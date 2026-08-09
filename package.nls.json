@@ -1,0 +1,19 @@
+{
+  "displayName": "OpenCodex IDE",
+  "description": "Multi-agent sidebar for local opencodex on VS Code, Cursor, VSCodium, Windsurf and compatible IDEs.",
+  "view.container": "OpenCodex",
+  "view.title": "Multi-Agent",
+  "cmd.openDashboard": "OpenCodex: Open Dashboard",
+  "cmd.refreshHealth": "OpenCodex: Refresh Health",
+  "cmd.focusChat": "OpenCodex: Focus Chat",
+  "cmd.sendSelection": "OpenCodex: Send Selection To Agent",
+  "cmd.setApiKey": "OpenCodex: Set API Key (SecretStorage)",
+  "cmd.clearApiKey": "OpenCodex: Clear API Key",
+  "cfg.baseUrl": "OpenAI-compatible base URL for the local opencodex proxy.",
+  "cfg.apiKey": "Fallback only. Prefer SecretStorage. Do not put real secrets here.",
+  "cfg.defaultModel": "Default model id from the proxy/catalog.",
+  "cfg.failoverModels": "Models to try if the primary returns 429/502/503/504.",
+  "cfg.enableToolsDefault": "Default for the Tools checkbox.",
+  "cfg.locale": "UI language: Spanish, English, or auto.",
+  "cfg.showCatalogModels": "Merge full OpenCodex provider seed catalog into model pickers."
+}

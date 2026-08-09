@@ -3,6 +3,8 @@
   const state = {
     agents: [],
     models: [],
+    modelMeta: [],
+    providers: [],
     sessions: [],
     presets: [],
     bodies: {},
@@ -11,6 +13,7 @@
     metrics: [],
     audit: [],
     lastAssistant: {},
+    i18n: {},
   };
 
   const $ = (id) => document.getElementById(id);
@@ -18,6 +21,7 @@
     health: $("health"),
     ctx: $("ctx"),
     agents: $("agents"),
+    providers: $("providers"),
     sessions: $("sessions"),
     metrics: $("metrics"),
     audit: $("audit"),
@@ -25,6 +29,7 @@
     newModel: $("newModel"),
     mode: $("mode"),
     preset: $("preset"),
+    locale: $("locale"),
     log: $("log"),
     input: $("input"),
     send: $("send"),
@@ -35,14 +40,26 @@
     includeGitDiff: $("includeGitDiff"),
     includeMemory: $("includeMemory"),
     enableTools: $("enableTools"),
+    showCatalogModels: $("showCatalogModels"),
     budget: $("budget"),
     debateRounds: $("debateRounds"),
     queue: $("queue"),
-    panelAgents: $("panel-agents"),
-    panelSessions: $("panel-sessions"),
-    panelMetrics: $("panel-metrics"),
-    panelAudit: $("panel-audit"),
   };
+
+  function tt(key) {
+    return state.i18n[key] || key;
+  }
+
+  function applyI18n() {
+    document.querySelectorAll("[data-i18n]").forEach((el) => {
+      const key = el.getAttribute("data-i18n");
+      if (key && state.i18n[key]) el.textContent = state.i18n[key];
+    });
+    document.querySelectorAll("[data-i18n-placeholder]").forEach((el) => {
+      const key = el.getAttribute("data-i18n-placeholder");
+      if (key && state.i18n[key]) el.setAttribute("placeholder", state.i18n[key]);
+    });
+  }
 
   function esc(s) {
     return String(s)
@@ -84,8 +101,8 @@
       actions.innerHTML = `
         <button class="secondary" data-act="copy">Copy</button>
         <button class="secondary" data-act="insert">Insert</button>
-        <button class="secondary" data-act="apply">Apply path blocks</button>
-        <button class="secondary" data-act="regen">Regenerate</button>
+        <button class="secondary" data-act="apply">Apply</button>
+        <button class="secondary" data-act="regen">Regen</button>
       `;
       actions.addEventListener("click", (e) => {
         const btn = e.target.closest("button");
@@ -101,11 +118,15 @@
     }
     els.log.appendChild(wrap);
     els.log.scrollTop = els.log.scrollHeight;
-    return { wrap, body, setText(t) {
-      meta.raw = t;
-      if (role === "assistant") body.innerHTML = renderMarkdown(t);
-      else body.textContent = t;
-    }};
+    return {
+      wrap,
+      body,
+      setText(t) {
+        meta.raw = t;
+        if (role === "assistant") body.innerHTML = renderMarkdown(t);
+        else body.textContent = t;
+      },
+    };
   }
 
   function setBusy(delta) {
@@ -121,6 +142,24 @@
       const next = state.queue.shift();
       sendNow(next);
     }
+  }
+
+  function modelLabel(id) {
+    const meta = state.modelMeta.find((m) => m.id === id);
+    if (!meta) return id;
+    const tag = meta.source === "live" ? tt("models.live") : tt("models.catalog");
+    return `${id} (${tag})`;
+  }
+
+  function fillModels(select, selected) {
+    select.innerHTML = "";
+    state.models.forEach((id) => {
+      const o = document.createElement("option");
+      o.value = id;
+      o.textContent = modelLabel(id);
+      if (id === selected) o.selected = true;
+      select.appendChild(o);
+    });
   }
 
   function renderAgents() {
@@ -144,13 +183,7 @@
         vscode.postMessage({ type: "agents:save", agents: state.agents });
       };
       const model = document.createElement("select");
-      state.models.forEach((id) => {
-        const o = document.createElement("option");
-        o.value = id;
-        o.textContent = id;
-        if (id === a.model) o.selected = true;
-        model.appendChild(o);
-      });
+      fillModels(model, a.model);
       model.onchange = () => {
         a.model = model.value;
         vscode.postMessage({ type: "agents:save", agents: state.agents });
@@ -165,6 +198,30 @@
       opt.value = a.id;
       opt.textContent = `${a.name} (${a.role})`;
       els.activeAgent.appendChild(opt);
+    });
+  }
+
+  function renderProviders() {
+    if (!els.providers) return;
+    els.providers.innerHTML = "";
+    state.providers.forEach((p) => {
+      const row = document.createElement("div");
+      row.className = "row";
+      row.style.justifyContent = "space-between";
+      const left = document.createElement("div");
+      left.innerHTML = `<strong></strong><div class="hint"></div>`;
+      left.querySelector("strong").textContent = p.name;
+      left.querySelector(".hint").textContent = `${p.id} · ${p.auth} · ${p.configured ? "ON" : "off"} · ${p.seedModels.length} models`;
+      const btn = document.createElement("button");
+      btn.className = "secondary";
+      btn.textContent = p.auth === "oauth" ? tt("btn.loginProvider") : tt("btn.enableProvider");
+      if (p.configured) {
+        btn.textContent = "OK";
+        btn.disabled = p.id !== "custom";
+      }
+      btn.onclick = () => vscode.postMessage({ type: "provider:enable", id: p.id });
+      row.append(left, btn);
+      els.providers.appendChild(row);
     });
   }
 
@@ -198,25 +255,14 @@
     els.metrics.innerHTML = state.metrics
       .slice(0, 30)
       .map((m) => `<div>${esc(m.agent)} · ${esc(m.model)} · ${m.latencyMs}ms · ~${m.tokensApprox || 0} tok ${m.failover ? "· failover" : ""}</div>`)
-      .join("") || "<div class='hint'>No metrics yet</div>";
+      .join("") || "<div class='hint'>—</div>";
   }
 
   function renderAudit() {
     els.audit.innerHTML = state.audit
       .slice(0, 40)
       .map((a) => `<div><strong>${esc(a.kind)}</strong> ${esc(a.detail)}</div>`)
-      .join("") || "<div class='hint'>Audit is redacted; no secrets stored.</div>";
-  }
-
-  function fillModels(select, selected) {
-    select.innerHTML = "";
-    state.models.forEach((id) => {
-      const o = document.createElement("option");
-      o.value = id;
-      o.textContent = id;
-      if (id === selected) o.selected = true;
-      select.appendChild(o);
-    });
+      .join("") || "<div class='hint'>—</div>";
   }
 
   function contextFlags() {
@@ -227,6 +273,7 @@
       includeGitDiff: els.includeGitDiff.checked,
       includeMemory: els.includeMemory.checked,
       enableTools: els.enableTools.checked,
+      showCatalogModels: els.showCatalogModels ? els.showCatalogModels.checked : true,
       budget: Number(els.budget.value || 0),
       debateRounds: Number(els.debateRounds.value || 2),
     };
@@ -271,7 +318,7 @@
       return;
     }
     const rec = new SR();
-    rec.lang = "es-ES";
+    rec.lang = els.locale && els.locale.value === "en" ? "en-US" : "es-ES";
     rec.onresult = (ev) => {
       els.input.value = (els.input.value + " " + ev.results[0][0].transcript).trim();
     };
@@ -287,20 +334,27 @@
     $("newName").value = "";
   };
   $("applyPreset").onclick = () => vscode.postMessage({ type: "preset:apply", id: els.preset.value });
+  if (els.locale) els.locale.onchange = () => vscode.postMessage({ type: "locale:set", locale: els.locale.value });
 
   document.querySelectorAll(".tabs button").forEach((btn) => {
     btn.onclick = () => {
       document.querySelectorAll(".tabs button").forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
-      ["agents", "sessions", "metrics", "audit"].forEach((name) => {
-        $("panel-" + name).classList.toggle("hidden", btn.dataset.tab !== name);
+      ["agents", "providers", "sessions", "metrics", "audit"].forEach((name) => {
+        const panel = $("panel-" + name);
+        if (panel) panel.classList.toggle("hidden", btn.dataset.tab !== name);
       });
     };
   });
 
   ["includeFile", "includeSelection", "includeDiagnostics", "includeGitDiff", "includeMemory"].forEach((id) => {
-    $(id).onchange = () => vscode.postMessage({ type: "toggleContext", ...contextFlags() });
+    const node = $(id);
+    if (node) node.onchange = () => vscode.postMessage({ type: "toggleContext", ...contextFlags() });
   });
+  if (els.showCatalogModels) {
+    els.showCatalogModels.onchange = () =>
+      vscode.postMessage({ type: "catalog:set", showCatalogModels: els.showCatalogModels.checked });
+  }
 
   els.input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
@@ -312,14 +366,19 @@
   window.addEventListener("message", (event) => {
     const msg = event.data;
     if (msg.type === "meta") {
-      els.health.textContent = msg.healthy ? "online" : "offline";
+      state.i18n = msg.i18n || {};
+      applyI18n();
+      els.health.textContent = msg.healthy ? tt("health.online") : tt("health.offline");
       els.health.className = "pill " + (msg.healthy ? "ok" : "bad");
       state.models = msg.models || [];
+      state.modelMeta = msg.modelMeta || state.models.map((id) => ({ id, source: "live" }));
       state.agents = msg.agents || [];
       state.sessions = msg.sessions || [];
       state.presets = msg.presets || [];
+      state.providers = msg.providers || [];
       state.metrics = msg.metrics || [];
       state.audit = msg.audit || [];
+      if (msg.locale && els.locale) els.locale.value = msg.locale;
       fillModels(els.newModel, msg.defaultModel);
       els.preset.innerHTML = "";
       state.presets.forEach((p) => {
@@ -334,7 +393,9 @@
       els.includeGitDiff.checked = !!msg.includeGitDiff;
       els.includeMemory.checked = !!msg.includeMemory;
       els.enableTools.checked = !!msg.enableTools;
+      if (els.showCatalogModels) els.showCatalogModels.checked = !!msg.showCatalogModels;
       renderAgents();
+      renderProviders();
       renderSessions();
       renderMetrics();
       renderAudit();

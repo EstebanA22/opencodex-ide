@@ -1,0 +1,19 @@
+{
+  "displayName": "OpenCodex IDE",
+  "description": "Barra multi-agente para opencodex local en VS Code, Cursor, VSCodium, Windsurf e IDEs compatibles.",
+  "view.container": "OpenCodex",
+  "view.title": "Multi-Agente",
+  "cmd.openDashboard": "OpenCodex: Abrir dashboard",
+  "cmd.refreshHealth": "OpenCodex: Actualizar estado",
+  "cmd.focusChat": "OpenCodex: Enfocar chat",
+  "cmd.sendSelection": "OpenCodex: Enviar selección al agente",
+  "cmd.setApiKey": "OpenCodex: Guardar API Key (SecretStorage)",
+  "cmd.clearApiKey": "OpenCodex: Borrar API Key",
+  "cfg.baseUrl": "URL base compatible con OpenAI del proxy local opencodex.",
+  "cfg.apiKey": "Solo fallback. Prefiere SecretStorage. No pongas secretos reales aquí.",
+  "cfg.defaultModel": "Modelo por defecto del proxy/catálogo.",
+  "cfg.failoverModels": "Modelos de respaldo si el primario responde 429/502/503/504.",
+  "cfg.enableToolsDefault": "Valor por defecto del checkbox de herramientas.",
+  "cfg.locale": "Idioma de la UI: español, inglés o auto.",
+  "cfg.showCatalogModels": "Combinar el catálogo completo de providers OpenCodex en los selectores de modelo."
+}

@@ -2,19 +2,24 @@ import * as vscode from "vscode";
 import { AgentDef, AgentStore, TEAM_PRESETS, ROLE_PROMPTS } from "./agentStore";
 import { applyCodeBlocks, insertAtCursor, replaceSelection } from "./apply";
 import { AuditLog } from "./auditLog";
+import { mergeModelCatalog, PROVIDER_CATALOG } from "./catalog";
 import {
   collectEditorContext,
   enrichContext,
   formatContextBlock,
   resolveMentions,
 } from "./contextService";
+import { Locale, normalizeLocale, t, table } from "./i18n";
 import { ProxyClient, ProxySettings } from "./proxyClient";
+import { enableProvider, listProviderStatus, safeProviderError } from "./providers";
 import { SessionStore } from "./sessionStore";
 import { ToolRunner, extractToolRequests } from "./tools";
 
 type SettingsFn = () => ProxySettings & {
   enableToolsDefault: boolean;
   failoverModels: string[];
+  locale: Locale;
+  showCatalogModels: boolean;
 };
 
 type UiMessage = {
@@ -31,6 +36,7 @@ export class OpenCodexChatProvider implements vscode.WebviewViewProvider {
   private includeGitDiff = false;
   private includeMemory = true;
   private enableTools = false;
+  private showCatalogModels = true;
   private abort?: AbortController;
   private metrics: Array<Record<string, unknown>> = [];
   private lastUserText = "";
@@ -63,21 +69,28 @@ export class OpenCodexChatProvider implements vscode.WebviewViewProvider {
   async refreshMeta(): Promise<void> {
     if (!this.view) return;
     const healthy = await this.client.health();
-    let models: string[] = [];
+    let liveModels: string[] = [];
     let error: string | undefined;
     try {
-      models = await this.client.listModels();
+      liveModels = await this.client.listModels();
     } catch (err) {
       error = err instanceof Error ? err.message : String(err);
     }
-    const { defaultModel } = this.settings();
+    const cfg = this.settings();
+    this.showCatalogModels = cfg.showCatalogModels;
+    const merged = mergeModelCatalog(liveModels);
+    const models = this.showCatalogModels ? merged.map((m) => m.id) : liveModels;
+    const modelMeta = this.showCatalogModels ? merged : liveModels.map((id) => ({ id, source: "live" as const }));
+    const providers = await listProviderStatus();
+    const locale = cfg.locale;
     await this.sessions.ensureActive();
     await this.view.webview.postMessage({
       type: "meta",
       healthy,
       models,
-      defaultModel,
-      agents: this.agents.load(defaultModel),
+      modelMeta,
+      defaultModel: cfg.defaultModel,
+      agents: this.agents.load(cfg.defaultModel),
       sessions: this.sessions.list().map((s) => ({
         id: s.id,
         title: s.title,
@@ -85,6 +98,8 @@ export class OpenCodexChatProvider implements vscode.WebviewViewProvider {
         updatedAt: s.updatedAt,
       })),
       presets: TEAM_PRESETS,
+      providers,
+      providerCount: PROVIDER_CATALOG.length,
       metrics: this.metrics,
       audit: this.audit.list(),
       includeFile: this.includeFile,
@@ -93,6 +108,9 @@ export class OpenCodexChatProvider implements vscode.WebviewViewProvider {
       includeGitDiff: this.includeGitDiff,
       includeMemory: this.includeMemory,
       enableTools: this.enableTools,
+      showCatalogModels: this.showCatalogModels,
+      locale,
+      i18n: table(locale),
       error,
     });
   }
@@ -132,8 +150,39 @@ export class OpenCodexChatProvider implements vscode.WebviewViewProvider {
         this.includeGitDiff = Boolean(msg.includeGitDiff);
         this.includeMemory = Boolean(msg.includeMemory);
         this.enableTools = Boolean(msg.enableTools);
+        this.showCatalogModels = Boolean(msg.showCatalogModels ?? this.showCatalogModels);
         await this.pushContextHint();
         break;
+      case "provider:enable": {
+        const id = String(msg.id || "");
+        const preset = PROVIDER_CATALOG.find((p) => p.id === id);
+        if (!preset) {
+          await this.view?.webview.postMessage({ type: "error", text: `Unknown provider: ${id}` });
+          break;
+        }
+        try {
+          const result = await enableProvider(preset, (kind, detail) => this.audit.record(kind, detail));
+          await this.view?.webview.postMessage({ type: "info", text: result });
+          await this.refreshMeta();
+        } catch (err) {
+          await this.view?.webview.postMessage({ type: "error", text: safeProviderError(err) });
+        }
+        break;
+      }
+      case "locale:set": {
+        const locale = normalizeLocale(String(msg.locale || "es"));
+        await vscode.workspace.getConfiguration("opencodex").update("locale", locale, true);
+        await this.refreshMeta();
+        break;
+      }
+      case "catalog:set": {
+        this.showCatalogModels = Boolean(msg.showCatalogModels);
+        await vscode.workspace
+          .getConfiguration("opencodex")
+          .update("showCatalogModels", this.showCatalogModels, true);
+        await this.refreshMeta();
+        break;
+      }
       case "send":
         await this.handleSend(String(msg.text || ""), String(msg.mode || "single"), msg.agentId as string | undefined, msg);
         break;
@@ -665,19 +714,26 @@ export class OpenCodexChatProvider implements vscode.WebviewViewProvider {
   <div class="row">
     <span id="health" class="pill">…</span>
     <span id="ctx" class="pill">context…</span>
+    <label class="chk"><span data-i18n="locale.label">Idioma</span>
+      <select id="locale">
+        <option value="es">Español</option>
+        <option value="en">English</option>
+      </select>
+    </label>
     <select id="mode">
-      <option value="single">Single</option>
-      <option value="team">Team + Orchestrator</option>
-      <option value="pipeline">Pipeline</option>
-      <option value="debate">Debate</option>
+      <option value="single" data-i18n="mode.single">Individual</option>
+      <option value="team" data-i18n="mode.team">Equipo + Orquestador</option>
+      <option value="pipeline" data-i18n="mode.pipeline">Pipeline</option>
+      <option value="debate" data-i18n="mode.debate">Debate</option>
     </select>
   </div>
 
   <div class="tabs">
-    <button class="secondary active" data-tab="agents">Agents</button>
-    <button class="secondary" data-tab="sessions">Sessions</button>
-    <button class="secondary" data-tab="metrics">Metrics</button>
-    <button class="secondary" data-tab="audit">Audit</button>
+    <button class="secondary active" data-tab="agents" data-i18n="tab.agents">Agentes</button>
+    <button class="secondary" data-tab="providers" data-i18n="tab.providers">Proveedores</button>
+    <button class="secondary" data-tab="sessions" data-i18n="tab.sessions">Sesiones</button>
+    <button class="secondary" data-tab="metrics" data-i18n="tab.metrics">Métricas</button>
+    <button class="secondary" data-tab="audit" data-i18n="tab.audit">Auditoría</button>
   </div>
   <div id="panel-agents">
     <div id="agents"></div>
@@ -694,51 +750,58 @@ export class OpenCodexChatProvider implements vscode.WebviewViewProvider {
         <option value="custom">custom</option>
       </select>
       <select id="newModel"></select>
-      <button id="addAgent" class="secondary">+ Agent</button>
+      <button id="addAgent" class="secondary" data-i18n="btn.addAgent">+ Agente</button>
     </div>
     <div class="row">
       <select id="preset"></select>
-      <button id="applyPreset" class="secondary">Apply preset</button>
+      <button id="applyPreset" class="secondary" data-i18n="btn.applyPreset">Aplicar preset</button>
       <input id="budget" type="number" min="0" max="8" value="0" title="Max agents (0=all)" style="width:64px" />
       <input id="debateRounds" type="number" min="1" max="4" value="2" title="Debate rounds" style="width:64px" />
     </div>
+    <div class="row">
+      <label class="chk"><input type="checkbox" id="showCatalogModels" checked /> <span data-i18n="chk.showCatalogModels">Mostrar catálogo completo</span></label>
+    </div>
+  </div>
+  <div id="panel-providers" class="hidden">
+    <div class="hint" data-i18n="providers.hint">Activa proveedores con OpenCodex (ocx).</div>
+    <div id="providers"></div>
   </div>
   <div id="panel-sessions" class="hidden">
-    <div class="row"><button id="newSession" class="secondary">New session</button></div>
+    <div class="row"><button id="newSession" class="secondary" data-i18n="btn.newSession">Nueva sesión</button></div>
     <div id="sessions"></div>
   </div>
   <div id="panel-metrics" class="hidden"><div id="metrics"></div></div>
   <div id="panel-audit" class="hidden">
-    <div class="row"><button id="clearAudit" class="secondary">Clear audit</button></div>
+    <div class="row"><button id="clearAudit" class="secondary" data-i18n="btn.clearAudit">Limpiar auditoría</button></div>
     <div id="audit"></div>
   </div>
 
   <div class="row">
-    <label class="chk"><input type="checkbox" id="includeFile" checked /> File</label>
-    <label class="chk"><input type="checkbox" id="includeSelection" checked /> Selection</label>
-    <label class="chk"><input type="checkbox" id="includeDiagnostics" /> Diagnostics</label>
-    <label class="chk"><input type="checkbox" id="includeGitDiff" /> Diff</label>
-    <label class="chk"><input type="checkbox" id="includeMemory" checked /> Memory</label>
-    <label class="chk"><input type="checkbox" id="enableTools" /> Tools</label>
+    <label class="chk"><input type="checkbox" id="includeFile" checked /> <span data-i18n="chk.file">Archivo</span></label>
+    <label class="chk"><input type="checkbox" id="includeSelection" checked /> <span data-i18n="chk.selection">Selección</span></label>
+    <label class="chk"><input type="checkbox" id="includeDiagnostics" /> <span data-i18n="chk.diagnostics">Diagnósticos</span></label>
+    <label class="chk"><input type="checkbox" id="includeGitDiff" /> <span data-i18n="chk.diff">Diff</span></label>
+    <label class="chk"><input type="checkbox" id="includeMemory" checked /> <span data-i18n="chk.memory">Memoria</span></label>
+    <label class="chk"><input type="checkbox" id="enableTools" /> <span data-i18n="chk.tools">Herramientas</span></label>
   </div>
   <div class="row">
-    <button id="inlineEdit" class="secondary">Inline edit</button>
-    <button id="diagnosticsLoop" class="secondary">Diagnostics loop</button>
-    <button id="testLoop" class="secondary">Test loop</button>
-    <button id="prHelper" class="secondary">PR helper</button>
-    <button id="scorecard" class="secondary">Scorecard</button>
-    <button id="voice" class="secondary">Voice</button>
+    <button id="inlineEdit" class="secondary" data-i18n="btn.inlineEdit">Edición inline</button>
+    <button id="diagnosticsLoop" class="secondary" data-i18n="btn.diagnosticsLoop">Loop diagnósticos</button>
+    <button id="testLoop" class="secondary" data-i18n="btn.testLoop">Loop tests</button>
+    <button id="prHelper" class="secondary" data-i18n="btn.prHelper">Ayuda PR</button>
+    <button id="scorecard" class="secondary" data-i18n="btn.scorecard">Scorecard</button>
+    <button id="voice" class="secondary" data-i18n="btn.voice">Voz</button>
   </div>
 
   <div id="log"></div>
   <div class="row"><select id="activeAgent" style="flex:1"></select><span id="queue" class="queue"></span></div>
-  <textarea id="input" placeholder="Enter envía · Shift+Enter nueva línea · @file @selection @diff @diagnostics @memory @folder:src"></textarea>
+  <textarea id="input" data-i18n-placeholder="placeholder.input" placeholder="Enter envía · Shift+Enter nueva línea · @file @selection @diff @diagnostics @memory"></textarea>
   <div class="row">
-    <button id="send">Enviar</button>
-    <button id="stop" class="secondary" disabled>Stop</button>
-    <button id="refresh" class="secondary">Refresh</button>
+    <button id="send" data-i18n="btn.send">Enviar</button>
+    <button id="stop" class="secondary" disabled data-i18n="btn.stop">Detener</button>
+    <button id="refresh" class="secondary" data-i18n="btn.refresh">Actualizar</button>
   </div>
-  <div class="hint">Secrets redacted · sensitive paths blocked · tools need approval · Continue untouched</div>
+  <div class="hint" data-i18n="hint.footer">Secretos redactados · rutas sensibles bloqueadas · tools con aprobación · UI ES/EN</div>
   <script src="${js}"></script>
 </body>
 </html>`;
@@ -747,3 +810,4 @@ export class OpenCodexChatProvider implements vscode.WebviewViewProvider {
 
 // silence unused import in case tree-shaking edge cases
 void ROLE_PROMPTS;
+void t;

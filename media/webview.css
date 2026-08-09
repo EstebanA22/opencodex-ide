@@ -28,9 +28,9 @@ select, input { padding: 4px 6px; }
 button { background: var(--btn); color: var(--btn-fg); border: none; padding: 6px 10px; cursor: pointer; }
 button.secondary { background: transparent; color: var(--fg); border: 1px solid var(--border); }
 button:disabled { opacity: .5; cursor: default; }
-#agents, #sessions, #metrics, #audit {
+#agents, #providers, #sessions, #metrics, #audit {
   border: 1px solid var(--border); border-radius: 8px; padding: 6px;
-  max-height: 140px; overflow: auto; font-size: 12px;
+  max-height: 180px; overflow: auto; font-size: 12px;
 }
 .agent {
   display: grid; grid-template-columns: auto 1fr auto auto auto; gap: 6px; align-items: center;

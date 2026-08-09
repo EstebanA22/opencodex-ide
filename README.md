@@ -1,53 +1,42 @@
 # OpenCodex IDE
 
-Multi-agent sidebar for **Cursor / VS Code** talking to a local [`opencodex`](https://www.npmjs.com/package/@bitkyc08/opencodex) proxy.
+Extensión multi-agente para **VS Code / Cursor / VSCodium / Windsurf** contra un proxy local [`opencodex`](https://opencodex.me).
 
-Does **not** modify Continue. Does **not** require Cursor Models override.
+- UI en **español** (también inglés)
+- Catálogo completo de **providers/modelos** OpenCodex
+- No modifica Continue
 
-## Features (v0.3.0)
-
-- Active file / selection / diagnostics / git diff / AGENTS.md memory
-- `@file` `@selection` `@folder:` `@diff` `@diagnostics` `@memory` mentions
-- Multiple agents + presets (PR Review, Bug Hunt, Feature Slice, Security Pass, Debate)
-- Modes: Single · Team+Orchestrator · Pipeline · Debate
-- Tools with approval (`read_file`, `grep`, `git_*`, `terminal`, `run_tests`)
-- Apply path:file blocks · Insert · Copy · Inline edit
-- Sessions, export markdown, queue, stop/regen, scorecard
-- Metrics (latency / approx tokens / failover) + redacted audit log
-- SecretStorage for API keys · secret redaction · sensitive path blocking
-
-## Prerequisites
+## Instalar
 
 ```bash
-npm install -g @bitkyc08/opencodex
-ocx service start
-ocx health
-```
-
-## Install
-
-Download the VSIX from [Releases](https://github.com/EstebanA22/opencodex-ide/releases) or build:
-
-```bash
-npm ci
-npm run compile
-npm run test:security
+npm ci && npm run compile && npm run test:security
 npx vsce package --no-dependencies
-cursor --install-extension ./opencodex-ide-0.3.0.vsix
+npm run install:ides   # Cursor + VS Code + VSCodium + Windsurf si existen
 ```
 
-Reload Cursor → open the **OpenCodex** activity-bar icon.
+O descarga el VSIX desde [Releases](https://github.com/EstebanA22/opencodex-ide/releases).
 
-## Security
+## Idioma
 
-See [SECURITY.md](./SECURITY.md). Use **OpenCodex: Set API Key (SecretStorage)** for non-dummy keys.
+Setting `opencodex.locale`: `es` (default) | `en` | `auto`  
+También hay selector Idioma/Language en el panel.
 
-## Tests
+## Catálogo de modelos
 
-```bash
-npm run test:security
-npm run test:smoke   # requires local proxy
-```
+- **Live**: lo que responde tu proxy (`/v1/models`)
+- **Catálogo**: seeds de todos los providers del registry OpenCodex
+- Pestaña **Proveedores**: activar/login con `ocx` (keys nunca al git)
+- Checkbox **Mostrar catálogo completo**
+
+Para que un modelo de catálogo funcione de verdad, activa su provider (`ocx login` / API key).
+
+## Compatibilidad IDE
+
+Ver [docs/IDE_COMPAT.md](./docs/IDE_COMPAT.md).
+
+## Seguridad
+
+Ver [SECURITY.md](./SECURITY.md).
 
 ## License
 

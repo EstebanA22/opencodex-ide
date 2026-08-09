@@ -3,6 +3,7 @@ import { AgentStore } from "./agentStore";
 import { AuditLog } from "./auditLog";
 import { OpenCodexChatProvider } from "./chatViewProvider";
 import { CredentialVault } from "./credentials";
+import { normalizeLocale } from "./i18n";
 import { ProxyClient, ProxySettings } from "./proxyClient";
 import { SessionStore } from "./sessionStore";
 import { ToolRunner } from "./tools";
@@ -11,7 +12,11 @@ export function activate(context: vscode.ExtensionContext): void {
   const vault = new CredentialVault(context.secrets);
   let cachedKey = "dummy";
 
-  const readSettings = (): ProxySettings & { enableToolsDefault: boolean } => {
+  const readSettings = (): ProxySettings & {
+    enableToolsDefault: boolean;
+    locale: ReturnType<typeof normalizeLocale>;
+    showCatalogModels: boolean;
+  } => {
     const cfg = vscode.workspace.getConfiguration("opencodex");
     return {
       baseUrl: cfg.get<string>("baseUrl", "http://127.0.0.1:10100/v1"),
@@ -19,6 +24,8 @@ export function activate(context: vscode.ExtensionContext): void {
       defaultModel: cfg.get<string>("defaultModel", "gpt-5.6-sol"),
       failoverModels: cfg.get<string[]>("failoverModels", ["gpt-5.6-terra", "gpt-5.5"]),
       enableToolsDefault: cfg.get<boolean>("enableToolsDefault", false),
+      locale: normalizeLocale(cfg.get<string>("locale", "es")),
+      showCatalogModels: cfg.get<boolean>("showCatalogModels", true),
     };
   };
 

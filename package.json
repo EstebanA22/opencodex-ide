@@ -1,8 +1,8 @@
 {
   "name": "opencodex-ide",
-  "displayName": "OpenCodex IDE",
-  "description": "Multi-agent Cursor/VS Code sidebar for local opencodex: context, tools, pipelines, apply/patch, secure SecretStorage.",
-  "version": "0.3.0",
+  "displayName": "%displayName%",
+  "description": "%description%",
+  "version": "0.4.0",
   "publisher": "novexus-local",
   "license": "MIT",
   "repository": {
@@ -26,8 +26,12 @@
     "codex",
     "multi-agent",
     "cursor",
+    "vscode",
+    "vscodium",
+    "windsurf",
     "proxy",
-    "security"
+    "security",
+    "español"
   ],
   "activationEvents": [
     "onStartupFinished"
@@ -38,7 +42,7 @@
       "activitybar": [
         {
           "id": "opencodex",
-          "title": "OpenCodex",
+          "title": "%view.container%",
           "icon": "media/opencodex.svg"
         }
       ]
@@ -48,36 +52,36 @@
         {
           "type": "webview",
           "id": "opencodex.chatView",
-          "name": "Multi-Agent"
+          "name": "%view.title%"
         }
       ]
     },
     "commands": [
       {
         "command": "opencodex.openDashboard",
-        "title": "OpenCodex: Open Dashboard",
+        "title": "%cmd.openDashboard%",
         "icon": "$(globe)"
       },
       {
         "command": "opencodex.refreshHealth",
-        "title": "OpenCodex: Refresh Health",
+        "title": "%cmd.refreshHealth%",
         "icon": "$(refresh)"
       },
       {
         "command": "opencodex.focusChat",
-        "title": "OpenCodex: Focus Chat"
+        "title": "%cmd.focusChat%"
       },
       {
         "command": "opencodex.sendSelectionToAgent",
-        "title": "OpenCodex: Send Selection To Agent"
+        "title": "%cmd.sendSelection%"
       },
       {
         "command": "opencodex.setApiKey",
-        "title": "OpenCodex: Set API Key (SecretStorage)"
+        "title": "%cmd.setApiKey%"
       },
       {
         "command": "opencodex.clearApiKey",
-        "title": "OpenCodex: Clear API Key"
+        "title": "%cmd.clearApiKey%"
       }
     ],
     "menus": {
@@ -107,28 +111,39 @@
         "opencodex.baseUrl": {
           "type": "string",
           "default": "http://127.0.0.1:10100/v1",
-          "description": "OpenAI-compatible base URL for the local opencodex proxy."
+          "description": "%cfg.baseUrl%"
         },
         "opencodex.apiKey": {
           "type": "string",
           "default": "dummy",
-          "description": "Fallback only. Prefer OpenCodex: Set API Key (SecretStorage). Do not put real secrets here."
+          "description": "%cfg.apiKey%"
         },
         "opencodex.defaultModel": {
           "type": "string",
           "default": "gpt-5.6-sol",
-          "description": "Default model id from the proxy catalog."
+          "description": "%cfg.defaultModel%"
         },
         "opencodex.failoverModels": {
           "type": "array",
           "items": { "type": "string" },
           "default": ["gpt-5.6-terra", "gpt-5.5"],
-          "description": "Models to try if the primary returns 429/502/503/504."
+          "description": "%cfg.failoverModels%"
         },
         "opencodex.enableToolsDefault": {
           "type": "boolean",
           "default": false,
-          "description": "Default for the Tools checkbox (terminal/tests require approval)."
+          "description": "%cfg.enableToolsDefault%"
+        },
+        "opencodex.locale": {
+          "type": "string",
+          "enum": ["es", "en", "auto"],
+          "default": "es",
+          "description": "%cfg.locale%"
+        },
+        "opencodex.showCatalogModels": {
+          "type": "boolean",
+          "default": true,
+          "description": "%cfg.showCatalogModels%"
         }
       }
     }
@@ -139,7 +154,8 @@
     "watch": "tsc -watch -p ./",
     "package": "vsce package --no-dependencies",
     "test:smoke": "node ./scripts/smoke-test.mjs",
-    "test:security": "node ./scripts/security-check.mjs"
+    "test:security": "node ./scripts/security-check.mjs",
+    "install:ides": "node ./scripts/install-ides.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
