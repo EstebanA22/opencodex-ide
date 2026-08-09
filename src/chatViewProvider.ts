@@ -722,8 +722,13 @@ export class OpenCodexChatProvider implements vscode.WebviewViewProvider {
   }
 
   private html(webview: vscode.Webview): string {
-    const css = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "webview.css"));
-    const js = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "webview.js"));
+    const v = "0.4.2";
+    const css = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "webview.css")).with({
+      query: `v=${v}`,
+    });
+    const js = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "webview.js")).with({
+      query: `v=${v}`,
+    });
     const csp = [
       "default-src 'none'",
       `style-src ${webview.cspSource}`,
@@ -737,9 +742,25 @@ export class OpenCodexChatProvider implements vscode.WebviewViewProvider {
   <meta http-equiv="Content-Security-Policy" content="${csp}" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="stylesheet" href="${css}" />
-  <title>OpenCodex</title>
+  <title>OpenCodex ${v}</title>
 </head>
 <body>
+  <div class="brand">
+    <div class="brand-mark">
+      <div class="name">OpenCodex</div>
+      <div class="tag" data-i18n="brand.tag">Chat multi-agente · proxy local</div>
+    </div>
+    <span class="ver" id="extVersion">v0.4.2</span>
+  </div>
+
+  <div id="quotaStrip" class="quota-strip">
+    <div class="qs-head">
+      <strong data-i18n="usage.liveTitle">Uso en vivo</strong>
+      <button id="refreshQuotaTop" class="ghost" data-i18n="usage.refresh">Actualizar</button>
+    </div>
+    <div id="quotaMini" class="qs-empty" data-i18n="usage.stripEmpty">Abrí Uso o actualizá para ver cuotas…</div>
+  </div>
+
   <div class="topbar">
     <div class="status-row">
       <span id="health" class="pill">…</span>
@@ -768,7 +789,7 @@ export class OpenCodexChatProvider implements vscode.WebviewViewProvider {
   </div>
 
   <div id="panel-chat">
-    <details class="section" open>
+    <details class="section">
       <summary data-i18n="section.agents">Agentes</summary>
       <div class="body">
         <div id="agents"></div>

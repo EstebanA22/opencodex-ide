@@ -2,7 +2,7 @@
   "displayName": "OpenCodex IDE",
   "description": "Multi-agent sidebar for local opencodex on VS Code, Cursor, VSCodium, Windsurf and compatible IDEs.",
   "view.container": "OpenCodex",
-  "view.title": "Multi-Agent",
+  "view.title": "Multi-Agent v0.4.2",
   "cmd.openDashboard": "OpenCodex: Open Dashboard",
   "cmd.refreshHealth": "OpenCodex: Refresh Health",
   "cmd.focusChat": "OpenCodex: Focus Chat",

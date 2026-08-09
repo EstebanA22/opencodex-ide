@@ -23,12 +23,21 @@ const candidates = [
 ];
 
 const target = path.join(root, vsix);
+const legacyIds = ["novexus-local.opencodex-ide"];
 let installed = 0;
 for (const c of candidates) {
   try {
     if (c.bin.includes("/") && !existsSync(c.bin)) {
       console.log(`SKIP: ${c.name} not available`);
       continue;
+    }
+    for (const legacy of legacyIds) {
+      try {
+        execFileSync(c.bin, ["--uninstall-extension", legacy], { stdio: "ignore" });
+        console.log(`OK: removed legacy ${legacy} from ${c.name}`);
+      } catch {
+        // not installed
+      }
     }
     execFileSync(c.bin, ["--install-extension", target, "--force"], { stdio: "inherit" });
     console.log(`OK: installed into ${c.name}`);

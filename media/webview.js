@@ -281,11 +281,45 @@
     return "cool";
   }
 
+  function renderQuotaMini(quota, refreshing) {
+    const mini = $("quotaMini");
+    if (!mini) return;
+    if (refreshing && !quota) {
+      mini.className = "qs-empty";
+      mini.textContent = tt("usage.loading");
+      return;
+    }
+    const windows = (((quota || {}).accounts || [])[0] || {}).windows || [];
+    if (!windows.length) {
+      mini.className = "qs-empty";
+      mini.textContent = quota && quota.error ? quota.error : tt("usage.stripEmpty");
+      return;
+    }
+    mini.className = "qs-bars";
+    mini.innerHTML = windows
+      .slice(0, 3)
+      .map((w) => {
+        const used = Number(w.usedPercent) || 0;
+        const left = Number.isFinite(Number(w.remainingPercent))
+          ? Number(w.remainingPercent)
+          : Math.max(0, 100 - used);
+        return `<div class="qs-row">
+          <span class="label">${esc(w.label)}</span>
+          <div class="qs-track"><div class="qs-fill ${toneClass(used)}" style="width:${used}%"></div></div>
+          <span class="pct">${left}% ${esc(tt("usage.remaining"))}${w.resetLabel ? ` · ${esc(w.resetLabel)}` : ""}</span>
+        </div>`;
+      })
+      .join("");
+  }
+
   function renderQuota(quota, refreshing) {
+    renderQuotaMini(quota, refreshing);
     const root = $("quotaLive");
     if (!root) return;
     const btn = $("refreshQuota");
     if (btn) btn.disabled = !!refreshing;
+    const btnTop = $("refreshQuotaTop");
+    if (btnTop) btnTop.disabled = !!refreshing;
     if (refreshing && !quota) {
       root.innerHTML = `<div class="hint">${esc(tt("usage.loading"))}</div>`;
       return;
@@ -435,6 +469,8 @@
   if (openGui) openGui.onclick = () => vscode.postMessage({ type: "openDashboard" });
   const refreshQuota = $("refreshQuota");
   if (refreshQuota) refreshQuota.onclick = () => vscode.postMessage({ type: "quota:refresh" });
+  const refreshQuotaTop = $("refreshQuotaTop");
+  if (refreshQuotaTop) refreshQuotaTop.onclick = () => vscode.postMessage({ type: "quota:refresh" });
   if (els.locale) els.locale.onchange = () => vscode.postMessage({ type: "locale:set", locale: els.locale.value });
 
   document.querySelectorAll(".tabs button").forEach((btn) => {

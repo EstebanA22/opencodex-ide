@@ -69,6 +69,8 @@ const en: Dict = {
   "usage.needsReauth": "needs re-login",
   "usage.active": "active",
   "usage.updated": "updated",
+  "brand.tag": "Multi-agent chat · local proxy",
+  "usage.stripEmpty": "Refresh to load live quotas…",
 };
 
 const es: Dict = {
@@ -138,6 +140,8 @@ const es: Dict = {
   "usage.needsReauth": "requiere re-login",
   "usage.active": "activa",
   "usage.updated": "actualizado",
+  "brand.tag": "Chat multi-agente · proxy local",
+  "usage.stripEmpty": "Actualizá para ver cuotas en vivo…",
 };
 
 const TABLES: Record<Locale, Dict> = { en, es };

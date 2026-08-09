@@ -2,7 +2,7 @@
   "displayName": "OpenCodex IDE",
   "description": "Barra multi-agente para opencodex local en VS Code, Cursor, VSCodium, Windsurf e IDEs compatibles.",
   "view.container": "OpenCodex",
-  "view.title": "Multi-Agente",
+  "view.title": "Multi-Agente v0.4.2",
   "cmd.openDashboard": "OpenCodex: Abrir dashboard",
   "cmd.refreshHealth": "OpenCodex: Actualizar estado",
   "cmd.focusChat": "OpenCodex: Enfocar chat",
