@@ -1,12 +1,23 @@
+import { redactSecrets } from "./security";
+
 export type ProxySettings = {
   baseUrl: string;
   apiKey: string;
   defaultModel: string;
+  failoverModels: string[];
 };
 
 export type ChatMessage = {
-  role: "system" | "user" | "assistant";
+  role: "system" | "user" | "assistant" | "tool";
   content: string;
+  name?: string;
+};
+
+export type ChatResult = {
+  content: string;
+  modelUsed: string;
+  latencyMs: number;
+  failoverUsed: boolean;
 };
 
 type SettingsFn = () => ProxySettings;
@@ -45,8 +56,44 @@ export class ProxyClient {
     messages: ChatMessage[];
     onDelta: (text: string) => void;
     signal?: AbortSignal;
+  }): Promise<ChatResult> {
+    const { failoverModels } = this.settings();
+    const candidates = [params.model, ...failoverModels.filter((m) => m && m !== params.model)];
+    let lastError: Error | undefined;
+    const started = Date.now();
+
+    for (let i = 0; i < candidates.length; i++) {
+      const model = candidates[i];
+      try {
+        const content = await this.chatOnce({ ...params, model });
+        return {
+          content,
+          modelUsed: model,
+          latencyMs: Date.now() - started,
+          failoverUsed: i > 0,
+        };
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        const msg = lastError.message;
+        const retryable = /HTTP (429|502|503|504)/.test(msg) || /overloaded|timeout/i.test(msg);
+        if (!retryable || i === candidates.length - 1) break;
+      }
+    }
+    throw lastError ?? new Error("chat failed");
+  }
+
+  private async chatOnce(params: {
+    model: string;
+    messages: ChatMessage[];
+    onDelta: (text: string) => void;
+    signal?: AbortSignal;
   }): Promise<string> {
     const { baseUrl, apiKey } = this.settings();
+    const safeMessages = params.messages.map((m) => ({
+      ...m,
+      content: redactSecrets(m.content),
+    }));
+
     const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/chat/completions`, {
       method: "POST",
       headers: {
@@ -55,7 +102,7 @@ export class ProxyClient {
       },
       body: JSON.stringify({
         model: params.model,
-        messages: params.messages,
+        messages: safeMessages,
         stream: true,
       }),
       signal: params.signal,
@@ -63,7 +110,7 @@ export class ProxyClient {
 
     if (!res.ok || !res.body) {
       const errText = await res.text().catch(() => "");
-      throw new Error(`chat HTTP ${res.status}: ${errText.slice(0, 400)}`);
+      throw new Error(`chat HTTP ${res.status}: ${redactSecrets(errText).slice(0, 400)}`);
     }
 
     const reader = res.body.getReader();

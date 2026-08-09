@@ -5,4 +5,9 @@ tsconfig.json
 **/*.ts
 **/*.map
 node_modules/**
+.github/**
+scripts/**
 *.md
+!README.md
+!SECURITY.md
+!LICENSE

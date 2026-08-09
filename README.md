@@ -1,65 +1,53 @@
 # OpenCodex IDE
 
-Multi-agent sidebar extension for **Cursor / VS Code** that talks to a local [`opencodex`](https://www.npmjs.com/package/@bitkyc08/opencodex) proxy.
+Multi-agent sidebar for **Cursor / VS Code** talking to a local [`opencodex`](https://www.npmjs.com/package/@bitkyc08/opencodex) proxy.
 
-- Does **not** modify Continue
-- Does **not** require Cursor Settings → Models override
-- Uses `http://127.0.0.1:10100/v1`
+Does **not** modify Continue. Does **not** require Cursor Models override.
 
-## Features
+## Features (v0.3.0)
 
-- **Active file + selection context** injected into every agent turn
-- **Multiple agents** with roles: coder, reviewer, architect, debugger, researcher, custom
-- **Team mode**: run enabled agents in parallel, then an **Orchestrator** synthesizes
-- Per-agent model picker from the live proxy catalog
-- Status bar health + dashboard shortcut
-- Editor context menu: **OpenCodex: Send Selection To Agent**
+- Active file / selection / diagnostics / git diff / AGENTS.md memory
+- `@file` `@selection` `@folder:` `@diff` `@diagnostics` `@memory` mentions
+- Multiple agents + presets (PR Review, Bug Hunt, Feature Slice, Security Pass, Debate)
+- Modes: Single · Team+Orchestrator · Pipeline · Debate
+- Tools with approval (`read_file`, `grep`, `git_*`, `terminal`, `run_tests`)
+- Apply path:file blocks · Insert · Copy · Inline edit
+- Sessions, export markdown, queue, stop/regen, scorecard
+- Metrics (latency / approx tokens / failover) + redacted audit log
+- SecretStorage for API keys · secret redaction · sensitive path blocking
 
 ## Prerequisites
 
 ```bash
 npm install -g @bitkyc08/opencodex
-ocx service install
 ocx service start
 ocx health
 ```
 
-## Install (from VSIX)
+## Install
+
+Download the VSIX from [Releases](https://github.com/EstebanA22/opencodex-ide/releases) or build:
 
 ```bash
-npm install
+npm ci
 npm run compile
+npm run test:security
 npx vsce package --no-dependencies
-cursor --install-extension ./opencodex-ide-0.2.0.vsix
+cursor --install-extension ./opencodex-ide-0.3.0.vsix
 ```
 
-Then reload Cursor and open the **OpenCodex** activity-bar icon.
+Reload Cursor → open the **OpenCodex** activity-bar icon.
 
-## Configure
+## Security
 
-Optional settings:
+See [SECURITY.md](./SECURITY.md). Use **OpenCodex: Set API Key (SecretStorage)** for non-dummy keys.
 
-| Setting | Default |
-|--------|---------|
-| `opencodex.baseUrl` | `http://127.0.0.1:10100/v1` |
-| `opencodex.apiKey` | `dummy` |
-| `opencodex.defaultModel` | `gpt-5.6-sol` |
-
-## Test
-
-With the proxy running:
+## Tests
 
 ```bash
-npm run test:smoke
+npm run test:security
+npm run test:smoke   # requires local proxy
 ```
-
-## Usage
-
-1. Keep `ocx` healthy
-2. Open the OpenCodex sidebar
-3. Enable the agents you want
-4. Choose **Single agent** or **Team + Orchestrator**
-5. Send a task (`Cmd/Ctrl+Enter`)
 
 ## License
 

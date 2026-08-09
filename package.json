@@ -1,8 +1,8 @@
 {
   "name": "opencodex-ide",
   "displayName": "OpenCodex IDE",
-  "description": "Multi-agent sidebar for the local opencodex proxy. Active-file/selection context, team orchestration, no Continue changes.",
-  "version": "0.2.0",
+  "description": "Multi-agent Cursor/VS Code sidebar for local opencodex: context, tools, pipelines, apply/patch, secure SecretStorage.",
+  "version": "0.3.0",
   "publisher": "novexus-local",
   "license": "MIT",
   "repository": {
@@ -26,7 +26,8 @@
     "codex",
     "multi-agent",
     "cursor",
-    "proxy"
+    "proxy",
+    "security"
   ],
   "activationEvents": [
     "onStartupFinished"
@@ -69,6 +70,14 @@
       {
         "command": "opencodex.sendSelectionToAgent",
         "title": "OpenCodex: Send Selection To Agent"
+      },
+      {
+        "command": "opencodex.setApiKey",
+        "title": "OpenCodex: Set API Key (SecretStorage)"
+      },
+      {
+        "command": "opencodex.clearApiKey",
+        "title": "OpenCodex: Clear API Key"
       }
     ],
     "menus": {
@@ -103,12 +112,23 @@
         "opencodex.apiKey": {
           "type": "string",
           "default": "dummy",
-          "description": "API key sent to the proxy (loopback usually accepts any value)."
+          "description": "Fallback only. Prefer OpenCodex: Set API Key (SecretStorage). Do not put real secrets here."
         },
         "opencodex.defaultModel": {
           "type": "string",
           "default": "gpt-5.6-sol",
           "description": "Default model id from the proxy catalog."
+        },
+        "opencodex.failoverModels": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["gpt-5.6-terra", "gpt-5.5"],
+          "description": "Models to try if the primary returns 429/502/503/504."
+        },
+        "opencodex.enableToolsDefault": {
+          "type": "boolean",
+          "default": false,
+          "description": "Default for the Tools checkbox (terminal/tests require approval)."
         }
       }
     }
@@ -118,7 +138,8 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "package": "vsce package --no-dependencies",
-    "test:smoke": "node ./scripts/smoke-test.mjs"
+    "test:smoke": "node ./scripts/smoke-test.mjs",
+    "test:security": "node ./scripts/security-check.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

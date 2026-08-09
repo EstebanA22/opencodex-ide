@@ -1,29 +1,48 @@
 import * as vscode from "vscode";
-import { AgentDef, AgentStore, ROLE_PROMPTS } from "./agentStore";
-import { collectEditorContext, formatContextBlock } from "./contextService";
+import { AgentDef, AgentStore, TEAM_PRESETS, ROLE_PROMPTS } from "./agentStore";
+import { applyCodeBlocks, insertAtCursor, replaceSelection } from "./apply";
+import { AuditLog } from "./auditLog";
+import {
+  collectEditorContext,
+  enrichContext,
+  formatContextBlock,
+  resolveMentions,
+} from "./contextService";
 import { ProxyClient, ProxySettings } from "./proxyClient";
+import { SessionStore } from "./sessionStore";
+import { ToolRunner, extractToolRequests } from "./tools";
 
-type UiMessage =
-  | { type: "ready" }
-  | { type: "refresh" }
-  | { type: "send"; text: string; mode: "single" | "team"; agentId?: string }
-  | { type: "agents:save"; agents: AgentDef[] }
-  | { type: "agents:add"; name: string; role: AgentDef["role"]; model: string }
-  | { type: "agents:remove"; id: string }
-  | { type: "toggleContext"; includeFile: boolean; includeSelection: boolean };
+type SettingsFn = () => ProxySettings & {
+  enableToolsDefault: boolean;
+  failoverModels: string[];
+};
+
+type UiMessage = {
+  type: string;
+  [key: string]: unknown;
+};
 
 export class OpenCodexChatProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = "opencodex.chatView";
   private view?: vscode.WebviewView;
   private includeFile = true;
   private includeSelection = true;
-  private histories = new Map<string, Array<{ role: "user" | "assistant"; content: string }>>();
+  private includeDiagnostics = false;
+  private includeGitDiff = false;
+  private includeMemory = true;
+  private enableTools = false;
+  private abort?: AbortController;
+  private metrics: Array<Record<string, unknown>> = [];
+  private lastUserText = "";
 
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly client: ProxyClient,
-    private readonly store: AgentStore,
-    private readonly settings: () => ProxySettings
+    private readonly agents: AgentStore,
+    private readonly sessions: SessionStore,
+    private readonly audit: AuditLog,
+    private readonly tools: ToolRunner,
+    private readonly settings: SettingsFn
   ) {}
 
   resolveWebviewView(
@@ -32,54 +51,13 @@ export class OpenCodexChatProvider implements vscode.WebviewViewProvider {
     _token: vscode.CancellationToken
   ): void {
     this.view = webviewView;
-    webviewView.webview.options = {
+    const { webview } = webviewView;
+    webview.options = {
       enableScripts: true,
       localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, "media")],
     };
-    webviewView.webview.html = this.html(webviewView.webview);
-
-    webviewView.webview.onDidReceiveMessage(async (msg: UiMessage) => {
-      switch (msg.type) {
-        case "ready":
-        case "refresh":
-          await this.refreshMeta();
-          await this.pushContextHint();
-          break;
-        case "send":
-          await this.handleSend(msg.text, msg.mode, msg.agentId);
-          break;
-        case "agents:save":
-          await this.store.save(msg.agents);
-          await this.refreshMeta();
-          break;
-        case "agents:add": {
-          const agents = this.store.load(this.settings().defaultModel);
-          agents.push(
-            this.store.create(
-              { name: msg.name, role: msg.role, model: msg.model, enabled: true },
-              this.settings().defaultModel
-            )
-          );
-          await this.store.save(agents);
-          await this.refreshMeta();
-          break;
-        }
-        case "agents:remove": {
-          const next = this.store
-            .load(this.settings().defaultModel)
-            .filter((a) => a.id !== msg.id);
-          await this.store.save(next);
-          this.histories.delete(msg.id);
-          await this.refreshMeta();
-          break;
-        }
-        case "toggleContext":
-          this.includeFile = msg.includeFile;
-          this.includeSelection = msg.includeSelection;
-          await this.pushContextHint();
-          break;
-      }
-    });
+    webview.html = this.html(webview);
+    webview.onDidReceiveMessage((msg: UiMessage) => void this.onMessage(msg));
   }
 
   async refreshMeta(): Promise<void> {
@@ -93,16 +71,28 @@ export class OpenCodexChatProvider implements vscode.WebviewViewProvider {
       error = err instanceof Error ? err.message : String(err);
     }
     const { defaultModel } = this.settings();
-    const agents = this.store.load(defaultModel);
+    await this.sessions.ensureActive();
     await this.view.webview.postMessage({
       type: "meta",
       healthy,
       models,
       defaultModel,
-      agents,
-      rolePrompts: ROLE_PROMPTS,
+      agents: this.agents.load(defaultModel),
+      sessions: this.sessions.list().map((s) => ({
+        id: s.id,
+        title: s.title,
+        pinned: s.pinned,
+        updatedAt: s.updatedAt,
+      })),
+      presets: TEAM_PRESETS,
+      metrics: this.metrics,
+      audit: this.audit.list(),
       includeFile: this.includeFile,
       includeSelection: this.includeSelection,
+      includeDiagnostics: this.includeDiagnostics,
+      includeGitDiff: this.includeGitDiff,
+      includeMemory: this.includeMemory,
+      enableTools: this.enableTools,
       error,
     });
   }
@@ -114,9 +104,7 @@ export class OpenCodexChatProvider implements vscode.WebviewViewProvider {
       type: "context",
       activeFile: ctx.activeFile?.path,
       hasSelection: Boolean(ctx.selection),
-      selectionLines: ctx.selection
-        ? `${ctx.selection.startLine}-${ctx.selection.endLine}`
-        : undefined,
+      selectionLines: ctx.selection ? `${ctx.selection.startLine}-${ctx.selection.endLine}` : undefined,
       openFiles: ctx.openFiles.length,
     });
   }
@@ -126,53 +114,302 @@ export class OpenCodexChatProvider implements vscode.WebviewViewProvider {
     if (!this.view || !ctx.selection) return;
     await this.view.webview.postMessage({
       type: "prefill",
-      text: `Revisa esta selección (${ctx.selection.path}:${ctx.selection.startLine}-${ctx.selection.endLine}) y propón mejoras concretas.`,
+      text: `Revisa @selection y propón mejoras concretas con bloques \`\`\`path:archivo\`\`\` aplicables.`,
     });
   }
 
-  private historyFor(agentId: string) {
-    if (!this.histories.has(agentId)) this.histories.set(agentId, []);
-    return this.histories.get(agentId)!;
+  private async onMessage(msg: UiMessage): Promise<void> {
+    switch (msg.type) {
+      case "ready":
+      case "refresh":
+        await this.refreshMeta();
+        await this.pushContextHint();
+        break;
+      case "toggleContext":
+        this.includeFile = Boolean(msg.includeFile);
+        this.includeSelection = Boolean(msg.includeSelection);
+        this.includeDiagnostics = Boolean(msg.includeDiagnostics);
+        this.includeGitDiff = Boolean(msg.includeGitDiff);
+        this.includeMemory = Boolean(msg.includeMemory);
+        this.enableTools = Boolean(msg.enableTools);
+        await this.pushContextHint();
+        break;
+      case "send":
+        await this.handleSend(String(msg.text || ""), String(msg.mode || "single"), msg.agentId as string | undefined, msg);
+        break;
+      case "stop":
+        this.abort?.abort();
+        await this.audit.record("stop", "User stopped generation");
+        break;
+      case "regen":
+        if (this.lastUserText) {
+          await this.handleSend(this.lastUserText, "single", msg.agentId as string | undefined, {
+            enableTools: this.enableTools,
+          });
+        }
+        break;
+      case "agents:save":
+        await this.agents.save(msg.agents as AgentDef[]);
+        await this.refreshMeta();
+        break;
+      case "agents:add": {
+        const list = this.agents.load(this.settings().defaultModel);
+        list.push(
+          this.agents.create(
+            {
+              name: String(msg.name || "Agent"),
+              role: (msg.role as AgentDef["role"]) || "custom",
+              model: String(msg.model || this.settings().defaultModel),
+              enabled: true,
+            },
+            this.settings().defaultModel
+          )
+        );
+        await this.agents.save(list);
+        await this.refreshMeta();
+        break;
+      }
+      case "agents:remove": {
+        const next = this.agents.load(this.settings().defaultModel).filter((a) => a.id !== msg.id);
+        await this.agents.save(next);
+        await this.refreshMeta();
+        break;
+      }
+      case "preset:apply":
+        await this.agents.applyPreset(String(msg.id), this.settings().defaultModel);
+        await this.audit.record("preset", `Applied preset ${msg.id}`);
+        await this.refreshMeta();
+        break;
+      case "session:new":
+        await this.sessions.create("New chat");
+        await this.view?.webview.postMessage({ type: "clearLog" });
+        await this.refreshMeta();
+        break;
+      case "session:open": {
+        await this.sessions.setActive(String(msg.id));
+        const session = this.sessions.get(String(msg.id));
+        await this.view?.webview.postMessage({ type: "clearLog" });
+        for (const t of session?.turns || []) {
+          await this.view?.webview.postMessage(
+            t.role === "user"
+              ? { type: "user", text: t.content, mode: "history" }
+              : {
+                  type: "assistantStart",
+                  agentId: t.agentId || "hist",
+                  agentName: t.agentName || "assistant",
+                  color: "#64748b",
+                  role: "custom",
+                  model: t.model || "",
+                }
+          );
+          if (t.role !== "user") {
+            await this.view?.webview.postMessage({
+              type: "assistantDelta",
+              agentId: t.agentId || "hist",
+              text: t.content,
+            });
+            await this.view?.webview.postMessage({ type: "assistantDone", agentId: t.agentId || "hist" });
+          }
+        }
+        await this.refreshMeta();
+        break;
+      }
+      case "session:pin": {
+        const s = this.sessions.get(String(msg.id));
+        if (s) await this.sessions.pin(s.id, !s.pinned);
+        await this.refreshMeta();
+        break;
+      }
+      case "session:remove":
+        await this.sessions.remove(String(msg.id));
+        await this.refreshMeta();
+        break;
+      case "session:export": {
+        const md = await this.sessions.exportMarkdown(String(msg.id));
+        const doc = await vscode.workspace.openTextDocument({ content: md, language: "markdown" });
+        await vscode.window.showTextDocument(doc, { preview: true });
+        break;
+      }
+      case "clipboard":
+        await vscode.env.clipboard.writeText(String(msg.text || ""));
+        break;
+      case "insert":
+        await insertAtCursor(this.extractPrimaryCode(String(msg.text || "")));
+        break;
+      case "apply": {
+        const results = await applyCodeBlocks(String(msg.text || ""));
+        await this.view?.webview.postMessage({
+          type: "info",
+          text: results.map((r) => `${r.ok ? "OK" : "ERR"} ${r.message}`).join("\n"),
+        });
+        await this.audit.record("apply", results.map((r) => r.message).join("; "));
+        break;
+      }
+      case "audit:clear":
+        await this.audit.clear();
+        await this.refreshMeta();
+        break;
+      case "scorecard":
+        await this.runScorecard();
+        break;
+      case "inlineEdit":
+        await this.inlineEdit(String(msg.instruction || ""));
+        break;
+      case "diagnosticsLoop":
+        await this.handleSend(
+          "Corrige los diagnósticos del archivo activo. Usa @diagnostics y entrega bloques path:file aplicables.",
+          "pipeline",
+          undefined,
+          { includeDiagnostics: true, enableTools: false }
+        );
+        break;
+      case "testLoop":
+        await this.handleSend(
+          "Corre los tests del proyecto, interpreta fallos y propone fixes con path:file blocks.",
+          "pipeline",
+          undefined,
+          { enableTools: true }
+        );
+        break;
+      case "prHelper":
+        await this.handleSend(
+          "Con @diff genera: resumen PR, riesgos, checklist de prueba y mensaje de commit convencional.",
+          "team",
+          undefined,
+          { includeGitDiff: true }
+        );
+        break;
+    }
   }
 
-  private async handleSend(text: string, mode: "single" | "team", agentId?: string): Promise<void> {
-    if (!this.view || !text.trim()) return;
-    const userText = text.trim();
-    const ctx = collectEditorContext();
-    const contextBlock = formatContextBlock(ctx, this.includeFile, this.includeSelection);
-    const agents = this.store.load(this.settings().defaultModel);
-    const targets =
-      mode === "team"
-        ? agents.filter((a) => a.enabled)
-        : agents.filter((a) => a.id === agentId).slice(0, 1);
+  private extractPrimaryCode(markdown: string): string {
+    const m = /```(?:[\w.+-]*)?(?:[ \t]+(?:path:)?[^\n]+)?\n([\s\S]*?)```/.exec(markdown);
+    return m?.[1] ?? markdown;
+  }
 
-    if (targets.length === 0) {
-      await this.view.webview.postMessage({
-        type: "error",
-        text: mode === "team" ? "No hay agentes habilitados." : "Selecciona un agente.",
-      });
+  private async handleSend(
+    text: string,
+    mode: string,
+    agentId: string | undefined,
+    flags: Record<string, unknown>
+  ): Promise<void> {
+    if (!this.view || !text.trim()) return;
+    this.lastUserText = text.trim();
+    this.enableTools = Boolean(flags.enableTools ?? this.enableTools);
+    this.includeDiagnostics = Boolean(flags.includeDiagnostics ?? this.includeDiagnostics);
+    this.includeGitDiff = Boolean(flags.includeGitDiff ?? this.includeGitDiff);
+    this.includeMemory = Boolean(flags.includeMemory ?? this.includeMemory);
+    this.includeFile = Boolean(flags.includeFile ?? this.includeFile);
+    this.includeSelection = Boolean(flags.includeSelection ?? this.includeSelection);
+
+    const budget = Number(flags.budget || 0);
+    const debateRounds = Math.max(1, Math.min(4, Number(flags.debateRounds || 2)));
+    const session = await this.sessions.ensureActive();
+    const mentions = await resolveMentions(text);
+    const baseCtx = collectEditorContext();
+    const ctx = await enrichContext(baseCtx, {
+      includeDiagnostics: this.includeDiagnostics,
+      includeGitDiff: this.includeGitDiff,
+      includeMemory: this.includeMemory,
+    });
+    const contextBlock = [
+      formatContextBlock(ctx, {
+        includeFile: this.includeFile,
+        includeSelection: this.includeSelection,
+        includeDiagnostics: this.includeDiagnostics,
+        includeGitDiff: this.includeGitDiff,
+        includeMemory: this.includeMemory,
+      }),
+      ...mentions.blocks,
+    ].join("\n\n");
+
+    await this.sessions.appendTurn(session.id, { role: "user", content: text });
+    await this.audit.record("send", `mode=${mode}`, { chars: text.length });
+    await this.view.webview.postMessage({ type: "user", text, mode });
+
+    const all = this.agents.load(this.settings().defaultModel);
+    let targets: AgentDef[] = [];
+    if (mode === "single") {
+      targets = all.filter((a) => a.id === agentId).slice(0, 1);
+      if (!targets.length) targets = all.filter((a) => a.enabled).slice(0, 1);
+    } else {
+      targets = all.filter((a) => a.enabled);
+    }
+    if (!targets.length) {
+      await this.view.webview.postMessage({ type: "error", text: "No agents enabled." });
       return;
     }
+    if (budget > 0 && targets.length > budget) {
+      targets = targets.slice(0, budget);
+    }
 
-    await this.view.webview.postMessage({ type: "user", text: userText, mode });
+    this.abort = new AbortController();
+    const userContent = mentions.cleaned;
 
-    const runs = targets.map((agent) => this.runAgent(agent, userText, contextBlock));
-    const results = await Promise.all(runs);
-
-    if (mode === "team" && results.some((r) => r.ok)) {
-      await this.synthesize(userText, results.filter((r) => r.ok));
+    try {
+      if (mode === "pipeline") {
+        let carry = userContent;
+        for (const agent of targets) {
+          const result = await this.runAgent(agent, carry, contextBlock, session.id);
+          if (result) carry = `${userContent}\n\nPrevious agent (${agent.name}) output:\n${result}`;
+        }
+      } else if (mode === "debate") {
+        const a = targets[0];
+        const b = targets[1] || targets[0];
+        let transcript = userContent;
+        for (let round = 1; round <= debateRounds; round++) {
+          const ra = await this.runAgent(
+            a,
+            `Debate round ${round}. Argue your position on:\n${transcript}`,
+            contextBlock,
+            session.id
+          );
+          const rb = await this.runAgent(
+            b,
+            `Debate round ${round}. Rebut and improve. Peer said:\n${ra}\n\nTopic:\n${transcript}`,
+            contextBlock,
+            session.id
+          );
+          transcript = `Round ${round}\n${a.name}: ${ra}\n${b.name}: ${rb}`;
+        }
+        await this.synthesize(userContent, [
+          { agent: a, content: transcript },
+          { agent: b, content: transcript },
+        ], session.id);
+      } else {
+        const results = await Promise.all(
+          targets.map((agent) =>
+            this.runAgent(agent, userContent, contextBlock, session.id).then((content) => ({
+              agent,
+              content: content || "",
+              ok: Boolean(content),
+            }))
+          )
+        );
+        if (mode === "team") {
+          await this.synthesize(
+            userContent,
+            results.filter((r) => r.ok).map((r) => ({ agent: r.agent, content: r.content })),
+            session.id
+          );
+          await this.maybeScore(results.filter((r) => r.ok));
+        }
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!/aborted/i.test(message)) {
+        await this.view.webview.postMessage({ type: "error", text: message });
+      }
     }
   }
 
   private async runAgent(
     agent: AgentDef,
     userText: string,
-    contextBlock: string
-  ): Promise<{ ok: boolean; agent: AgentDef; content: string }> {
-    if (!this.view) return { ok: false, agent, content: "" };
-    const history = this.historyFor(agent.id);
-    history.push({ role: "user", content: userText });
-
+    contextBlock: string,
+    sessionId: string
+  ): Promise<string | undefined> {
+    if (!this.view) return;
     await this.view.webview.postMessage({
       type: "assistantStart",
       agentId: agent.id,
@@ -182,42 +419,84 @@ export class OpenCodexChatProvider implements vscode.WebviewViewProvider {
       model: agent.model,
     });
 
+    const toolHint = this.enableTools
+      ? `\nYou may request tools with:\n\`\`\`tool\n{"name":"read_file|grep|list_dir|git_status|git_diff|run_tests|terminal","args":{"path":"...","pattern":"...","command":"..."}}\n\`\`\`\nDangerous tools require user approval. Never ask for secrets.`
+      : "";
+
     try {
-      const content = await this.client.chat({
+      let result = await this.client.chat({
         model: agent.model,
+        signal: this.abort?.signal,
         messages: [
-          { role: "system", content: agent.systemPrompt },
+          { role: "system", content: agent.systemPrompt + toolHint },
           { role: "system", content: contextBlock },
-          ...history,
+          { role: "user", content: userText },
         ],
         onDelta: (delta) => {
-          void this.view?.webview.postMessage({
-            type: "assistantDelta",
-            agentId: agent.id,
-            text: delta,
-          });
+          void this.view?.webview.postMessage({ type: "assistantDelta", agentId: agent.id, text: delta });
         },
       });
-      const finalText = content || "(empty response)";
-      history.push({ role: "assistant", content: finalText });
+
+      if (this.enableTools) {
+        const reqs = extractToolRequests(result.content).slice(0, 3);
+        for (const req of reqs) {
+          const toolResult = await this.tools.run(req, { allowDangerous: false });
+          await this.audit.record("tool", `${req.name}`, { ok: toolResult.ok });
+          const follow = await this.client.chat({
+            model: agent.model,
+            signal: this.abort?.signal,
+            messages: [
+              { role: "system", content: agent.systemPrompt },
+              { role: "system", content: contextBlock },
+              { role: "user", content: userText },
+              { role: "assistant", content: result.content },
+              {
+                role: "user",
+                content: `Tool ${toolResult.name} =>\n${toolResult.output}\nContinue with final answer. Use path:file fences for edits.`,
+              },
+            ],
+            onDelta: (delta) => {
+              void this.view?.webview.postMessage({ type: "assistantDelta", agentId: agent.id, text: delta });
+            },
+          });
+          result = follow;
+        }
+      }
+
+      const finalText = result.content || "(empty response)";
+      await this.sessions.appendTurn(sessionId, {
+        role: "assistant",
+        content: finalText,
+        agentId: agent.id,
+        agentName: agent.name,
+        model: result.modelUsed,
+        latencyMs: result.latencyMs,
+        tokensApprox: Math.ceil(finalText.length / 4),
+      });
+      const metric = {
+        agent: agent.name,
+        model: result.modelUsed,
+        latencyMs: result.latencyMs,
+        tokensApprox: Math.ceil(finalText.length / 4),
+        failover: result.failoverUsed,
+      };
+      this.metrics = [metric, ...this.metrics].slice(0, 50);
+      await this.view.webview.postMessage({ type: "metric", metric });
       await this.view.webview.postMessage({ type: "assistantDone", agentId: agent.id });
-      return { ok: true, agent, content: finalText };
+      return finalText;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      await this.view.webview.postMessage({
-        type: "error",
-        text: `${agent.name}: ${message}`,
-        agentId: agent.id,
-      });
-      return { ok: false, agent, content: "" };
+      await this.view.webview.postMessage({ type: "error", text: `${agent.name}: ${message}`, agentId: agent.id });
+      return undefined;
     }
   }
 
   private async synthesize(
     userText: string,
-    results: Array<{ agent: AgentDef; content: string }>
+    results: Array<{ agent: AgentDef; content: string }>,
+    sessionId: string
   ): Promise<void> {
-    if (!this.view) return;
+    if (!this.view || !results.length) return;
     const synthId = "orchestrator";
     await this.view.webview.postMessage({
       type: "assistantStart",
@@ -227,32 +506,32 @@ export class OpenCodexChatProvider implements vscode.WebviewViewProvider {
       role: "custom",
       model: this.settings().defaultModel,
     });
-
     const dossier = results
       .map((r) => `### ${r.agent.name} (${r.agent.role}/${r.agent.model})\n${r.content}`)
       .join("\n\n");
-
     try {
-      await this.client.chat({
+      const result = await this.client.chat({
         model: this.settings().defaultModel,
+        signal: this.abort?.signal,
         messages: [
           {
             role: "system",
             content:
-              "You are the orchestrator. Merge specialist agent answers into one actionable plan. Call out disagreements. Prefer Spanish if the user writes in Spanish.",
+              "You are the orchestrator. Merge specialist answers into one actionable plan. Call out disagreements. Prefer Spanish if the user writes in Spanish.",
           },
-          {
-            role: "user",
-            content: `User task:\n${userText}\n\nAgent reports:\n${dossier}\n\nProduce the final synthesis.`,
-          },
+          { role: "user", content: `User task:\n${userText}\n\nAgent reports:\n${dossier}` },
         ],
         onDelta: (delta) => {
-          void this.view?.webview.postMessage({
-            type: "assistantDelta",
-            agentId: synthId,
-            text: delta,
-          });
+          void this.view?.webview.postMessage({ type: "assistantDelta", agentId: synthId, text: delta });
         },
+      });
+      await this.sessions.appendTurn(sessionId, {
+        role: "assistant",
+        content: result.content,
+        agentId: synthId,
+        agentName: "Orchestrator",
+        model: result.modelUsed,
+        latencyMs: result.latencyMs,
       });
       await this.view.webview.postMessage({ type: "assistantDone", agentId: synthId });
     } catch (err) {
@@ -261,11 +540,116 @@ export class OpenCodexChatProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async maybeScore(results: Array<{ agent: AgentDef; content: string }>): Promise<void> {
+    if (results.length < 2 || !this.view) return;
+    const scoreId = "scorecard";
+    await this.view.webview.postMessage({
+      type: "assistantStart",
+      agentId: scoreId,
+      agentName: "Scorecard",
+      color: "#eab308",
+      role: "custom",
+      model: this.settings().defaultModel,
+    });
+    try {
+      await this.client.chat({
+        model: this.settings().defaultModel,
+        signal: this.abort?.signal,
+        messages: [
+          {
+            role: "system",
+            content:
+              "Score each agent answer 0-10 on correctness, security, completeness. Return a compact markdown table and pick a winner.",
+          },
+          {
+            role: "user",
+            content: results.map((r) => `## ${r.agent.name}\n${r.content}`).join("\n\n"),
+          },
+        ],
+        onDelta: (delta) => {
+          void this.view?.webview.postMessage({ type: "assistantDelta", agentId: scoreId, text: delta });
+        },
+      });
+      await this.view.webview.postMessage({ type: "assistantDone", agentId: scoreId });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.view.webview.postMessage({ type: "error", text: `Scorecard: ${message}` });
+    }
+  }
+
+  private async runScorecard(): Promise<void> {
+    const session = await this.sessions.ensureActive();
+    const assistants = session.turns.filter((t) => t.role === "assistant").slice(-6);
+    if (assistants.length < 2) {
+      await this.view?.webview.postMessage({ type: "error", text: "Need at least 2 assistant answers to score." });
+      return;
+    }
+    await this.maybeScore(
+      assistants.map((t) => ({
+        agent: {
+          id: t.agentId || t.id,
+          name: t.agentName || "agent",
+          role: "custom",
+          model: t.model || this.settings().defaultModel,
+          systemPrompt: "",
+          enabled: true,
+          color: "#eab308",
+        },
+        content: t.content,
+      }))
+    );
+  }
+
+  private async inlineEdit(instruction: string): Promise<void> {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.selection.isEmpty) {
+      await this.view?.webview.postMessage({ type: "error", text: "Select code for inline edit." });
+      return;
+    }
+    const selected = editor.document.getText(editor.selection);
+    const prompt = instruction || "Improve this code.";
+    const agentId = "inline";
+    await this.view?.webview.postMessage({
+      type: "assistantStart",
+      agentId,
+      agentName: "Inline Edit",
+      color: "#06b6d4",
+      role: "coder",
+      model: this.settings().defaultModel,
+    });
+    try {
+      let full = "";
+      await this.client.chat({
+        model: this.settings().defaultModel,
+        signal: this.abort?.signal,
+        messages: [
+          {
+            role: "system",
+            content: "Return ONLY the replacement code for the selection. No markdown fences.",
+          },
+          { role: "user", content: `${prompt}\n\n\`\`\`\n${selected}\n\`\`\`` },
+        ],
+        onDelta: (delta) => {
+          full += delta;
+          void this.view?.webview.postMessage({ type: "assistantDelta", agentId, text: delta });
+        },
+      });
+      await replaceSelection(full.replace(/^```[\s\S]*?\n/, "").replace(/```$/, "").trim());
+      await this.view?.webview.postMessage({ type: "assistantDone", agentId });
+      await this.audit.record("inlineEdit", "Applied inline edit");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.view?.webview.postMessage({ type: "error", text: message });
+    }
+  }
+
   private html(webview: vscode.Webview): string {
+    const css = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "webview.css"));
+    const js = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "webview.js"));
     const csp = [
       "default-src 'none'",
-      `style-src ${webview.cspSource} 'unsafe-inline'`,
-      `script-src ${webview.cspSource} 'unsafe-inline'`,
+      `style-src ${webview.cspSource}`,
+      `script-src ${webview.cspSource}`,
     ].join("; ");
 
     return `<!DOCTYPE html>
@@ -274,292 +658,92 @@ export class OpenCodexChatProvider implements vscode.WebviewViewProvider {
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="${csp}" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="${css}" />
   <title>OpenCodex</title>
-  <style>
-    :root {
-      color-scheme: light dark;
-      --bg: var(--vscode-sideBar-background);
-      --fg: var(--vscode-foreground);
-      --muted: var(--vscode-descriptionForeground);
-      --border: var(--vscode-panel-border, #444);
-      --input: var(--vscode-input-background);
-      --btn: var(--vscode-button-background);
-      --btn-fg: var(--vscode-button-foreground);
-      --err: var(--vscode-errorForeground);
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0; padding: 10px; height: 100vh;
-      display: flex; flex-direction: column; gap: 8px;
-      font-family: var(--vscode-font-family); color: var(--fg); background: var(--bg);
-    }
-    .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-    .pill { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
-    .pill.ok { color: #3fb950; border-color: #3fb95055; }
-    .pill.bad { color: var(--err); }
-    select, input, textarea, button {
-      font: inherit; color: var(--fg); background: var(--input);
-      border: 1px solid var(--border); border-radius: 6px;
-    }
-    select, input { padding: 4px 6px; }
-    button { background: var(--btn); color: var(--btn-fg); border: none; padding: 6px 10px; cursor: pointer; }
-    button.secondary { background: transparent; color: var(--fg); border: 1px solid var(--border); }
-    button:disabled { opacity: .5; cursor: default; }
-    #agents {
-      display: flex; flex-direction: column; gap: 6px; max-height: 160px; overflow: auto;
-      border: 1px solid var(--border); border-radius: 8px; padding: 6px;
-    }
-    .agent {
-      display: grid; grid-template-columns: auto 1fr auto auto; gap: 6px; align-items: center;
-      font-size: 12px;
-    }
-    .dot { width: 10px; height: 10px; border-radius: 50%; }
-    #log {
-      flex: 1; overflow: auto; border: 1px solid var(--border); border-radius: 8px;
-      padding: 8px; display: flex; flex-direction: column; gap: 8px;
-    }
-    .msg { white-space: pre-wrap; word-break: break-word; font-size: 12.5px; line-height: 1.4; }
-    .msg.user { opacity: .95; }
-    .msg.assistant { border-left: 3px solid var(--accent, var(--btn)); padding-left: 8px; }
-    .msg.error { color: var(--err); }
-    .role { font-size: 10px; text-transform: uppercase; color: var(--muted); margin-bottom: 2px; }
-    textarea { width: 100%; min-height: 70px; resize: vertical; padding: 8px; }
-    .hint { font-size: 11px; color: var(--muted); }
-    label.chk { font-size: 11px; color: var(--muted); display: flex; gap: 4px; align-items: center; }
-    .addbox { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-  </style>
 </head>
 <body>
   <div class="row">
     <span id="health" class="pill">…</span>
     <span id="ctx" class="pill">context…</span>
     <select id="mode">
-      <option value="single">Single agent</option>
+      <option value="single">Single</option>
       <option value="team">Team + Orchestrator</option>
+      <option value="pipeline">Pipeline</option>
+      <option value="debate">Debate</option>
     </select>
   </div>
 
-  <div id="agents"></div>
-
-  <div class="addbox">
-    <input id="newName" placeholder="Nuevo agente (nombre)" />
-    <select id="newRole">
-      <option value="coder">coder</option>
-      <option value="reviewer">reviewer</option>
-      <option value="architect">architect</option>
-      <option value="debugger">debugger</option>
-      <option value="researcher">researcher</option>
-      <option value="custom">custom</option>
-    </select>
-    <select id="newModel"></select>
-    <button id="addAgent" class="secondary">+ Agregar agente</button>
+  <div class="tabs">
+    <button class="secondary active" data-tab="agents">Agents</button>
+    <button class="secondary" data-tab="sessions">Sessions</button>
+    <button class="secondary" data-tab="metrics">Metrics</button>
+    <button class="secondary" data-tab="audit">Audit</button>
+  </div>
+  <div id="panel-agents">
+    <div id="agents"></div>
+    <div class="row">
+      <input id="newName" placeholder="Nuevo agente" />
+      <select id="newRole">
+        <option value="coder">coder</option>
+        <option value="reviewer">reviewer</option>
+        <option value="architect">architect</option>
+        <option value="debugger">debugger</option>
+        <option value="researcher">researcher</option>
+        <option value="tester">tester</option>
+        <option value="security">security</option>
+        <option value="custom">custom</option>
+      </select>
+      <select id="newModel"></select>
+      <button id="addAgent" class="secondary">+ Agent</button>
+    </div>
+    <div class="row">
+      <select id="preset"></select>
+      <button id="applyPreset" class="secondary">Apply preset</button>
+      <input id="budget" type="number" min="0" max="8" value="0" title="Max agents (0=all)" style="width:64px" />
+      <input id="debateRounds" type="number" min="1" max="4" value="2" title="Debate rounds" style="width:64px" />
+    </div>
+  </div>
+  <div id="panel-sessions" class="hidden">
+    <div class="row"><button id="newSession" class="secondary">New session</button></div>
+    <div id="sessions"></div>
+  </div>
+  <div id="panel-metrics" class="hidden"><div id="metrics"></div></div>
+  <div id="panel-audit" class="hidden">
+    <div class="row"><button id="clearAudit" class="secondary">Clear audit</button></div>
+    <div id="audit"></div>
   </div>
 
   <div class="row">
-    <label class="chk"><input type="checkbox" id="includeFile" checked /> Active file</label>
+    <label class="chk"><input type="checkbox" id="includeFile" checked /> File</label>
     <label class="chk"><input type="checkbox" id="includeSelection" checked /> Selection</label>
+    <label class="chk"><input type="checkbox" id="includeDiagnostics" /> Diagnostics</label>
+    <label class="chk"><input type="checkbox" id="includeGitDiff" /> Diff</label>
+    <label class="chk"><input type="checkbox" id="includeMemory" checked /> Memory</label>
+    <label class="chk"><input type="checkbox" id="enableTools" /> Tools</label>
+  </div>
+  <div class="row">
+    <button id="inlineEdit" class="secondary">Inline edit</button>
+    <button id="diagnosticsLoop" class="secondary">Diagnostics loop</button>
+    <button id="testLoop" class="secondary">Test loop</button>
+    <button id="prHelper" class="secondary">PR helper</button>
+    <button id="scorecard" class="secondary">Scorecard</button>
+    <button id="voice" class="secondary">Voice</button>
   </div>
 
   <div id="log"></div>
-  <div class="row">
-    <select id="activeAgent" style="flex:1"></select>
-  </div>
-  <textarea id="input" placeholder="Tarea para OpenCodex… (Cmd/Ctrl+Enter)"></textarea>
+  <div class="row"><select id="activeAgent" style="flex:1"></select><span id="queue" class="queue"></span></div>
+  <textarea id="input" placeholder="Enter envía · Shift+Enter nueva línea · @file @selection @diff @diagnostics @memory @folder:src"></textarea>
   <div class="row">
     <button id="send">Enviar</button>
+    <button id="stop" class="secondary" disabled>Stop</button>
     <button id="refresh" class="secondary">Refresh</button>
   </div>
-  <div class="hint">Multi-agent · contexto IDE · proxy local · Continue intacto</div>
-
-  <script>
-    const vscode = acquireVsCodeApi();
-    const state = { agents: [], models: [], bodies: {}, busy: 0 };
-
-    const els = {
-      health: document.getElementById('health'),
-      ctx: document.getElementById('ctx'),
-      agents: document.getElementById('agents'),
-      activeAgent: document.getElementById('activeAgent'),
-      newModel: document.getElementById('newModel'),
-      mode: document.getElementById('mode'),
-      log: document.getElementById('log'),
-      input: document.getElementById('input'),
-      send: document.getElementById('send'),
-      includeFile: document.getElementById('includeFile'),
-      includeSelection: document.getElementById('includeSelection'),
-    };
-
-    function addMsg(role, text, meta = {}) {
-      const wrap = document.createElement('div');
-      wrap.className = 'msg ' + role;
-      if (meta.color) wrap.style.setProperty('--accent', meta.color);
-      const label = document.createElement('div');
-      label.className = 'role';
-      label.textContent = meta.title || role;
-      const body = document.createElement('div');
-      body.textContent = text;
-      wrap.appendChild(label);
-      wrap.appendChild(body);
-      els.log.appendChild(wrap);
-      els.log.scrollTop = els.log.scrollHeight;
-      return body;
-    }
-
-    function renderAgents() {
-      els.agents.innerHTML = '';
-      els.activeAgent.innerHTML = '';
-      state.agents.forEach((a) => {
-        const row = document.createElement('div');
-        row.className = 'agent';
-        row.style.gridTemplateColumns = 'auto 1fr auto auto auto';
-
-        const left = document.createElement('span');
-        left.className = 'dot';
-        left.style.background = a.color;
-
-        const mid = document.createElement('div');
-        mid.innerHTML = '<strong></strong><div class="hint"></div>';
-        mid.querySelector('strong').textContent = a.name;
-        mid.querySelector('.hint').textContent = a.role;
-
-        const en = document.createElement('input');
-        en.type = 'checkbox';
-        en.checked = a.enabled;
-        en.title = 'Enabled in team';
-        en.onchange = () => {
-          a.enabled = en.checked;
-          vscode.postMessage({ type: 'agents:save', agents: state.agents });
-        };
-
-        const model = document.createElement('select');
-        state.models.forEach((id) => {
-          const o = document.createElement('option');
-          o.value = id; o.textContent = id;
-          if (id === a.model) o.selected = true;
-          model.appendChild(o);
-        });
-        model.onchange = () => {
-          a.model = model.value;
-          vscode.postMessage({ type: 'agents:save', agents: state.agents });
-        };
-
-        const rm = document.createElement('button');
-        rm.className = 'secondary';
-        rm.textContent = '×';
-        rm.title = 'Remove agent';
-        rm.onclick = () => vscode.postMessage({ type: 'agents:remove', id: a.id });
-
-        row.appendChild(left);
-        row.appendChild(mid);
-        row.appendChild(en);
-        row.appendChild(model);
-        row.appendChild(rm);
-        els.agents.appendChild(row);
-
-        const opt = document.createElement('option');
-        opt.value = a.id;
-        opt.textContent = a.name + ' (' + a.role + ')';
-        els.activeAgent.appendChild(opt);
-      });
-    }
-
-    function fillModels(select, selected) {
-      select.innerHTML = '';
-      state.models.forEach((id) => {
-        const o = document.createElement('option');
-        o.value = id; o.textContent = id;
-        if (id === selected) o.selected = true;
-        select.appendChild(o);
-      });
-    }
-
-    function setBusy(delta) {
-      state.busy = Math.max(0, state.busy + delta);
-      els.send.disabled = state.busy > 0;
-    }
-
-    els.send.onclick = () => {
-      const text = els.input.value.trim();
-      if (!text || state.busy) return;
-      vscode.postMessage({
-        type: 'send',
-        text,
-        mode: els.mode.value,
-        agentId: els.activeAgent.value,
-      });
-      els.input.value = '';
-    };
-    document.getElementById('refresh').onclick = () => vscode.postMessage({ type: 'refresh' });
-    document.getElementById('addAgent').onclick = () => {
-      const name = document.getElementById('newName').value.trim() || 'Agent';
-      vscode.postMessage({
-        type: 'agents:add',
-        name,
-        role: document.getElementById('newRole').value,
-        model: els.newModel.value,
-      });
-      document.getElementById('newName').value = '';
-    };
-    const emitCtx = () => vscode.postMessage({
-      type: 'toggleContext',
-      includeFile: els.includeFile.checked,
-      includeSelection: els.includeSelection.checked,
-    });
-    els.includeFile.onchange = emitCtx;
-    els.includeSelection.onchange = emitCtx;
-    els.input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-        e.preventDefault();
-        els.send.click();
-      }
-    });
-
-    window.addEventListener('message', (event) => {
-      const msg = event.data;
-      if (msg.type === 'meta') {
-        els.health.textContent = msg.healthy ? 'online' : 'offline';
-        els.health.className = 'pill ' + (msg.healthy ? 'ok' : 'bad');
-        state.models = msg.models || [];
-        state.agents = msg.agents || [];
-        fillModels(els.newModel, msg.defaultModel);
-        els.includeFile.checked = !!msg.includeFile;
-        els.includeSelection.checked = !!msg.includeSelection;
-        renderAgents();
-        if (msg.error) addMsg('error', msg.error);
-      }
-      if (msg.type === 'context') {
-        const bits = [];
-        if (msg.activeFile) bits.push(msg.activeFile);
-        if (msg.hasSelection) bits.push('sel ' + msg.selectionLines);
-        bits.push(msg.openFiles + ' visible');
-        els.ctx.textContent = bits.join(' · ') || 'no editor';
-      }
-      if (msg.type === 'prefill') els.input.value = msg.text;
-      if (msg.type === 'user') addMsg('user', msg.text, { title: 'you · ' + msg.mode });
-      if (msg.type === 'assistantStart') {
-        setBusy(1);
-        state.bodies[msg.agentId] = addMsg('assistant', '', {
-          title: msg.agentName + ' · ' + msg.role + ' · ' + msg.model,
-          color: msg.color,
-        });
-      }
-      if (msg.type === 'assistantDelta' && state.bodies[msg.agentId]) {
-        state.bodies[msg.agentId].textContent += msg.text;
-        els.log.scrollTop = els.log.scrollHeight;
-      }
-      if (msg.type === 'assistantDone') {
-        setBusy(-1);
-        delete state.bodies[msg.agentId];
-      }
-      if (msg.type === 'error') {
-        setBusy(-1);
-        addMsg('error', msg.text);
-      }
-    });
-
-    vscode.postMessage({ type: 'ready' });
-  </script>
+  <div class="hint">Secrets redacted · sensitive paths blocked · tools need approval · Continue untouched</div>
+  <script src="${js}"></script>
 </body>
 </html>`;
   }
 }
+
+// silence unused import in case tree-shaking edge cases
+void ROLE_PROMPTS;

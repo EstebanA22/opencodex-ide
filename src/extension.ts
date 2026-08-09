@@ -1,21 +1,46 @@
 import * as vscode from "vscode";
 import { AgentStore } from "./agentStore";
+import { AuditLog } from "./auditLog";
 import { OpenCodexChatProvider } from "./chatViewProvider";
-import { ProxyClient } from "./proxyClient";
+import { CredentialVault } from "./credentials";
+import { ProxyClient, ProxySettings } from "./proxyClient";
+import { SessionStore } from "./sessionStore";
+import { ToolRunner } from "./tools";
 
 export function activate(context: vscode.ExtensionContext): void {
-  const settings = () => {
+  const vault = new CredentialVault(context.secrets);
+  let cachedKey = "dummy";
+
+  const readSettings = (): ProxySettings & { enableToolsDefault: boolean } => {
     const cfg = vscode.workspace.getConfiguration("opencodex");
     return {
       baseUrl: cfg.get<string>("baseUrl", "http://127.0.0.1:10100/v1"),
-      apiKey: cfg.get<string>("apiKey", "dummy"),
+      apiKey: cachedKey,
       defaultModel: cfg.get<string>("defaultModel", "gpt-5.6-sol"),
+      failoverModels: cfg.get<string[]>("failoverModels", ["gpt-5.6-terra", "gpt-5.5"]),
+      enableToolsDefault: cfg.get<boolean>("enableToolsDefault", false),
     };
   };
 
-  const client = new ProxyClient(settings);
+  const refreshKey = async () => {
+    const cfgKey = vscode.workspace.getConfiguration("opencodex").get<string>("apiKey", "dummy");
+    cachedKey = await vault.getApiKey(cfgKey);
+  };
+
+  const client = new ProxyClient(() => readSettings());
   const agents = new AgentStore(context.globalState);
-  const provider = new OpenCodexChatProvider(context.extensionUri, client, agents, settings);
+  const sessions = new SessionStore(context.globalState);
+  const audit = new AuditLog(context.globalState);
+  const tools = new ToolRunner();
+  const provider = new OpenCodexChatProvider(
+    context.extensionUri,
+    client,
+    agents,
+    sessions,
+    audit,
+    tools,
+    () => readSettings()
+  );
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(OpenCodexChatProvider.viewType, provider, {
@@ -30,6 +55,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(status);
 
   const refreshHealth = async () => {
+    await refreshKey();
     const healthy = await client.health();
     status.text = healthy ? "$(rocket) OpenCodex" : "$(warning) OpenCodex offline";
     status.backgroundColor = healthy
@@ -49,6 +75,25 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("opencodex.sendSelectionToAgent", async () => {
       await vscode.commands.executeCommand("opencodex.chatView.focus");
       await provider.prefillFromSelection();
+    }),
+    vscode.commands.registerCommand("opencodex.setApiKey", async () => {
+      const value = await vscode.window.showInputBox({
+        title: "OpenCodex API key",
+        prompt: "Stored in SecretStorage (not settings.json). Use dummy for local loopback.",
+        password: true,
+        ignoreFocusOut: true,
+      });
+      if (value === undefined) return;
+      await vault.setApiKey(value);
+      await audit.record("credentials", "API key updated in SecretStorage");
+      await refreshKey();
+      vscode.window.showInformationMessage("OpenCodex API key saved to SecretStorage.");
+    }),
+    vscode.commands.registerCommand("opencodex.clearApiKey", async () => {
+      await vault.clear();
+      await audit.record("credentials", "API key cleared from SecretStorage");
+      await refreshKey();
+      vscode.window.showInformationMessage("OpenCodex API key cleared.");
     })
   );
 
