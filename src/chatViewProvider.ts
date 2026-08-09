@@ -12,6 +12,7 @@ import {
 import { Locale, normalizeLocale, t, table } from "./i18n";
 import { ProxyClient, ProxySettings } from "./proxyClient";
 import { enableProvider, listProviderStatus, safeProviderError } from "./providers";
+import { fetchQuotaSnapshot, QuotaSnapshot } from "./quota";
 import { SessionStore } from "./sessionStore";
 import { ToolRunner, extractToolRequests } from "./tools";
 
@@ -40,6 +41,8 @@ export class OpenCodexChatProvider implements vscode.WebviewViewProvider {
   private abort?: AbortController;
   private metrics: Array<Record<string, unknown>> = [];
   private lastUserText = "";
+  private quota: QuotaSnapshot | undefined;
+  private quotaRefreshing = false;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -111,8 +114,27 @@ export class OpenCodexChatProvider implements vscode.WebviewViewProvider {
       showCatalogModels: this.showCatalogModels,
       locale,
       i18n: table(locale),
+      quota: this.quota,
+      quotaRefreshing: this.quotaRefreshing,
       error,
     });
+  }
+
+  async refreshQuota(force = false): Promise<void> {
+    if (this.quotaRefreshing) return;
+    if (!force && this.quota && Date.now() - Date.parse(this.quota.fetchedAt) < 60_000) {
+      await this.view?.webview.postMessage({ type: "quota", quota: this.quota, quotaRefreshing: false });
+      return;
+    }
+    this.quotaRefreshing = true;
+    await this.view?.webview.postMessage({ type: "quota", quota: this.quota, quotaRefreshing: true });
+    try {
+      this.quota = await fetchQuotaSnapshot(this.settings().locale);
+      await this.audit.record("quota", "Quota snapshot refreshed");
+    } finally {
+      this.quotaRefreshing = false;
+      await this.view?.webview.postMessage({ type: "quota", quota: this.quota, quotaRefreshing: false });
+    }
   }
 
   async pushContextHint(): Promise<void> {
@@ -142,6 +164,10 @@ export class OpenCodexChatProvider implements vscode.WebviewViewProvider {
       case "refresh":
         await this.refreshMeta();
         await this.pushContextHint();
+        void this.refreshQuota(msg.type === "refresh");
+        break;
+      case "quota:refresh":
+        await this.refreshQuota(true);
         break;
       case "toggleContext":
         this.includeFile = Boolean(msg.includeFile);
@@ -183,6 +209,9 @@ export class OpenCodexChatProvider implements vscode.WebviewViewProvider {
         await this.refreshMeta();
         break;
       }
+      case "openDashboard":
+        await vscode.commands.executeCommand("opencodex.openDashboard");
+        break;
       case "send":
         await this.handleSend(String(msg.text || ""), String(msg.mode || "single"), msg.agentId as string | undefined, msg);
         break;
@@ -711,103 +740,170 @@ export class OpenCodexChatProvider implements vscode.WebviewViewProvider {
   <title>OpenCodex</title>
 </head>
 <body>
-  <div class="row">
-    <span id="health" class="pill">…</span>
-    <span id="ctx" class="pill">context…</span>
-    <label class="chk"><span data-i18n="locale.label">Idioma</span>
-      <select id="locale">
-        <option value="es">Español</option>
-        <option value="en">English</option>
+  <div class="topbar">
+    <div class="status-row">
+      <span id="health" class="pill">…</span>
+      <span id="ctx" class="pill">context…</span>
+      <span class="queue" id="queueTop"></span>
+    </div>
+    <div class="status-row">
+      <select id="mode" title="Mode" style="flex:1">
+        <option value="single" data-i18n="mode.single">Individual</option>
+        <option value="team" data-i18n="mode.team">Equipo + Orquestador</option>
+        <option value="pipeline" data-i18n="mode.pipeline">Pipeline</option>
+        <option value="debate" data-i18n="mode.debate">Debate</option>
       </select>
-    </label>
-    <select id="mode">
-      <option value="single" data-i18n="mode.single">Individual</option>
-      <option value="team" data-i18n="mode.team">Equipo + Orquestador</option>
-      <option value="pipeline" data-i18n="mode.pipeline">Pipeline</option>
-      <option value="debate" data-i18n="mode.debate">Debate</option>
-    </select>
+      <select id="locale" title="Language">
+        <option value="es">ES</option>
+        <option value="en">EN</option>
+      </select>
+    </div>
+    <div class="tabs">
+      <button class="secondary active" data-tab="chat" data-i18n="tab.agents">Agentes</button>
+      <button class="secondary" data-tab="usage" data-i18n="tab.usage">Uso</button>
+      <button class="secondary" data-tab="providers" data-i18n="tab.providers">Proveedores</button>
+      <button class="secondary" data-tab="sessions" data-i18n="tab.sessions">Sesiones</button>
+      <button class="secondary" data-tab="more" data-i18n="section.advanced">Avanzado</button>
+    </div>
   </div>
 
-  <div class="tabs">
-    <button class="secondary active" data-tab="agents" data-i18n="tab.agents">Agentes</button>
-    <button class="secondary" data-tab="providers" data-i18n="tab.providers">Proveedores</button>
-    <button class="secondary" data-tab="sessions" data-i18n="tab.sessions">Sesiones</button>
-    <button class="secondary" data-tab="metrics" data-i18n="tab.metrics">Métricas</button>
-    <button class="secondary" data-tab="audit" data-i18n="tab.audit">Auditoría</button>
+  <div id="panel-chat">
+    <details class="section" open>
+      <summary data-i18n="section.agents">Agentes</summary>
+      <div class="body">
+        <div id="agents"></div>
+        <div class="addbox">
+          <input id="newName" placeholder="Nuevo agente" />
+          <select id="newRole">
+            <option value="coder">coder</option>
+            <option value="reviewer">reviewer</option>
+            <option value="architect">architect</option>
+            <option value="debugger">debugger</option>
+            <option value="researcher">researcher</option>
+            <option value="tester">tester</option>
+            <option value="security">security</option>
+            <option value="custom">custom</option>
+          </select>
+          <select id="newModel"></select>
+          <button id="addAgent" class="secondary" data-i18n="btn.addAgent">+ Agente</button>
+        </div>
+      </div>
+    </details>
+
+    <details class="section">
+      <summary data-i18n="section.context">Contexto</summary>
+      <div class="body">
+        <div class="chip-row">
+          <label class="chip"><input type="checkbox" id="includeFile" checked /> <span data-i18n="chk.file">Archivo</span></label>
+          <label class="chip"><input type="checkbox" id="includeSelection" checked /> <span data-i18n="chk.selection">Selección</span></label>
+          <label class="chip"><input type="checkbox" id="includeDiagnostics" /> <span data-i18n="chk.diagnostics">Diagnósticos</span></label>
+          <label class="chip"><input type="checkbox" id="includeGitDiff" /> <span data-i18n="chk.diff">Diff</span></label>
+          <label class="chip"><input type="checkbox" id="includeMemory" checked /> <span data-i18n="chk.memory">Memoria</span></label>
+          <label class="chip"><input type="checkbox" id="enableTools" /> <span data-i18n="chk.tools">Herramientas</span></label>
+          <label class="chip"><input type="checkbox" id="showCatalogModels" checked /> <span data-i18n="chk.showCatalogModels">Catálogo completo</span></label>
+        </div>
+      </div>
+    </details>
+
+    <details class="section">
+      <summary data-i18n="section.tools">Herramientas rápidas</summary>
+      <div class="body">
+        <div class="tools-grid">
+          <button id="inlineEdit" class="secondary" data-i18n="btn.inlineEdit">Edición inline</button>
+          <button id="diagnosticsLoop" class="secondary" data-i18n="btn.diagnosticsLoop">Loop diagnósticos</button>
+          <button id="testLoop" class="secondary" data-i18n="btn.testLoop">Loop tests</button>
+          <button id="prHelper" class="secondary" data-i18n="btn.prHelper">Ayuda PR</button>
+          <button id="scorecard" class="secondary" data-i18n="btn.scorecard">Scorecard</button>
+          <button id="voice" class="secondary" data-i18n="btn.voice">Voz</button>
+        </div>
+      </div>
+    </details>
   </div>
-  <div id="panel-agents">
-    <div id="agents"></div>
-    <div class="row">
-      <input id="newName" placeholder="Nuevo agente" />
-      <select id="newRole">
-        <option value="coder">coder</option>
-        <option value="reviewer">reviewer</option>
-        <option value="architect">architect</option>
-        <option value="debugger">debugger</option>
-        <option value="researcher">researcher</option>
-        <option value="tester">tester</option>
-        <option value="security">security</option>
-        <option value="custom">custom</option>
-      </select>
-      <select id="newModel"></select>
-      <button id="addAgent" class="secondary" data-i18n="btn.addAgent">+ Agente</button>
-    </div>
-    <div class="row">
-      <select id="preset"></select>
-      <button id="applyPreset" class="secondary" data-i18n="btn.applyPreset">Aplicar preset</button>
-      <input id="budget" type="number" min="0" max="8" value="0" title="Max agents (0=all)" style="width:64px" />
-      <input id="debateRounds" type="number" min="1" max="4" value="2" title="Debate rounds" style="width:64px" />
-    </div>
-    <div class="row">
-      <label class="chk"><input type="checkbox" id="showCatalogModels" checked /> <span data-i18n="chk.showCatalogModels">Mostrar catálogo completo</span></label>
+
+  <div id="panel-usage" class="hidden">
+    <div class="section">
+      <div class="body">
+        <div class="row" style="justify-content:space-between">
+          <strong data-i18n="usage.title">¿Cuánto se puede usar?</strong>
+          <button id="refreshQuota" class="secondary" data-i18n="usage.refresh">Actualizar cuotas</button>
+        </div>
+        <div class="hint" data-i18n="usage.intro">OpenCodex no tiene cupo propio.</div>
+        <div id="quotaLive" class="quota-live"></div>
+        <div id="usage">
+          <div class="usage-card">
+            <div class="tier" data-i18n="usage.cheap.title">Barato / local</div>
+            <div class="hint" data-i18n="usage.cheap.body"></div>
+          </div>
+          <div class="usage-card">
+            <div class="tier" data-i18n="usage.mid.title">Medio / flexible</div>
+            <div class="hint" data-i18n="usage.mid.body"></div>
+          </div>
+          <div class="usage-card">
+            <div class="tier" data-i18n="usage.pro.title">Fuerte / premium</div>
+            <div class="hint" data-i18n="usage.pro.body"></div>
+          </div>
+        </div>
+        <div class="hint" data-i18n="usage.tip"></div>
+        <button id="openGui" class="secondary" data-i18n="usage.openGui">Abrir dashboard OpenCodex</button>
+      </div>
     </div>
   </div>
+
   <div id="panel-providers" class="hidden">
-    <div class="hint" data-i18n="providers.hint">Activa proveedores con OpenCodex (ocx).</div>
-    <div id="providers"></div>
-  </div>
-  <div id="panel-sessions" class="hidden">
-    <div class="row"><button id="newSession" class="secondary" data-i18n="btn.newSession">Nueva sesión</button></div>
-    <div id="sessions"></div>
-  </div>
-  <div id="panel-metrics" class="hidden"><div id="metrics"></div></div>
-  <div id="panel-audit" class="hidden">
-    <div class="row"><button id="clearAudit" class="secondary" data-i18n="btn.clearAudit">Limpiar auditoría</button></div>
-    <div id="audit"></div>
+    <div class="section">
+      <div class="body">
+        <div class="hint" data-i18n="providers.hint">Activa proveedores con OpenCodex (ocx).</div>
+        <div id="providers"></div>
+      </div>
+    </div>
   </div>
 
-  <div class="row">
-    <label class="chk"><input type="checkbox" id="includeFile" checked /> <span data-i18n="chk.file">Archivo</span></label>
-    <label class="chk"><input type="checkbox" id="includeSelection" checked /> <span data-i18n="chk.selection">Selección</span></label>
-    <label class="chk"><input type="checkbox" id="includeDiagnostics" /> <span data-i18n="chk.diagnostics">Diagnósticos</span></label>
-    <label class="chk"><input type="checkbox" id="includeGitDiff" /> <span data-i18n="chk.diff">Diff</span></label>
-    <label class="chk"><input type="checkbox" id="includeMemory" checked /> <span data-i18n="chk.memory">Memoria</span></label>
-    <label class="chk"><input type="checkbox" id="enableTools" /> <span data-i18n="chk.tools">Herramientas</span></label>
+  <div id="panel-sessions" class="hidden">
+    <div class="section">
+      <div class="body">
+        <button id="newSession" class="secondary" data-i18n="btn.newSession">Nueva sesión</button>
+        <div id="sessions"></div>
+      </div>
+    </div>
   </div>
-  <div class="row">
-    <button id="inlineEdit" class="secondary" data-i18n="btn.inlineEdit">Edición inline</button>
-    <button id="diagnosticsLoop" class="secondary" data-i18n="btn.diagnosticsLoop">Loop diagnósticos</button>
-    <button id="testLoop" class="secondary" data-i18n="btn.testLoop">Loop tests</button>
-    <button id="prHelper" class="secondary" data-i18n="btn.prHelper">Ayuda PR</button>
-    <button id="scorecard" class="secondary" data-i18n="btn.scorecard">Scorecard</button>
-    <button id="voice" class="secondary" data-i18n="btn.voice">Voz</button>
+
+  <div id="panel-more" class="hidden">
+    <details class="section" open>
+      <summary data-i18n="section.advanced">Avanzado</summary>
+      <div class="body">
+        <div class="row">
+          <select id="preset" style="flex:1"></select>
+          <button id="applyPreset" class="secondary" data-i18n="btn.applyPreset">Aplicar preset</button>
+        </div>
+        <div class="row">
+          <input id="budget" type="number" min="0" max="8" value="0" title="Max agents" style="width:72px" />
+          <input id="debateRounds" type="number" min="1" max="4" value="2" title="Debate rounds" style="width:72px" />
+          <button id="clearAudit" class="secondary" data-i18n="btn.clearAudit">Limpiar auditoría</button>
+        </div>
+        <div id="metrics"></div>
+        <div id="audit"></div>
+      </div>
+    </details>
   </div>
 
   <div id="log"></div>
-  <div class="row"><select id="activeAgent" style="flex:1"></select><span id="queue" class="queue"></span></div>
-  <textarea id="input" data-i18n-placeholder="placeholder.input" placeholder="Enter envía · Shift+Enter nueva línea · @file @selection @diff @diagnostics @memory"></textarea>
-  <div class="row">
-    <button id="send" data-i18n="btn.send">Enviar</button>
-    <button id="stop" class="secondary" disabled data-i18n="btn.stop">Detener</button>
-    <button id="refresh" class="secondary" data-i18n="btn.refresh">Actualizar</button>
+
+  <div class="composer">
+    <select id="activeAgent"></select>
+    <textarea id="input" data-i18n-placeholder="placeholder.input" placeholder="Enter envía · Shift+Enter nueva línea"></textarea>
+    <div class="composer-actions">
+      <button id="send" data-i18n="btn.send">Enviar</button>
+      <button id="stop" class="secondary" disabled data-i18n="btn.stop">Detener</button>
+      <button id="refresh" class="ghost" data-i18n="btn.refresh">Actualizar</button>
+      <span id="queue" class="queue"></span>
+    </div>
+    <div class="hint" data-i18n="hint.footer"></div>
   </div>
-  <div class="hint" data-i18n="hint.footer">Secretos redactados · rutas sensibles bloqueadas · tools con aprobación · UI ES/EN</div>
   <script src="${js}"></script>
 </body>
 </html>`;
   }
 }
 
-// silence unused import in case tree-shaking edge cases
 void ROLE_PROMPTS;
 void t;

@@ -137,7 +137,10 @@
   }
 
   function flushQueue() {
-    els.queue.textContent = state.queue.length ? `Queue: ${state.queue.length}` : "";
+    const q = state.queue.length ? `Queue: ${state.queue.length}` : "";
+    if (els.queue) els.queue.textContent = q;
+    const qt = document.getElementById("queueTop");
+    if (qt) qt.textContent = q;
     if (state.busy === 0 && state.queue.length) {
       const next = state.queue.shift();
       sendNow(next);
@@ -186,13 +189,21 @@
       fillModels(model, a.model);
       model.onchange = () => {
         a.model = model.value;
+        const hint = mid.querySelector(".hint");
+        if (hint) hint.textContent = a.role + " · " + a.model;
         vscode.postMessage({ type: "agents:save", agents: state.agents });
       };
       const rm = document.createElement("button");
       rm.className = "secondary";
       rm.textContent = "×";
       rm.onclick = () => vscode.postMessage({ type: "agents:remove", id: a.id });
-      row.append(left, mid, en, model, rm);
+      const controls = document.createElement("div");
+      controls.className = "controls";
+      controls.append(en, model, rm);
+      rm.className = "ghost";
+      left.style.color = a.color;
+      mid.querySelector(".hint").textContent = a.role + " · " + a.model;
+      row.append(left, mid, controls);
       els.agents.appendChild(row);
       const opt = document.createElement("option");
       opt.value = a.id;
@@ -206,8 +217,7 @@
     els.providers.innerHTML = "";
     state.providers.forEach((p) => {
       const row = document.createElement("div");
-      row.className = "row";
-      row.style.justifyContent = "space-between";
+      row.className = "provider-row";
       const left = document.createElement("div");
       left.innerHTML = `<strong></strong><div class="hint"></div>`;
       left.querySelector("strong").textContent = p.name;
@@ -263,6 +273,93 @@
       .slice(0, 40)
       .map((a) => `<div><strong>${esc(a.kind)}</strong> ${esc(a.detail)}</div>`)
       .join("") || "<div class='hint'>—</div>";
+  }
+
+  function toneClass(used) {
+    if (used >= 90) return "hot";
+    if (used >= 70) return "warm";
+    return "cool";
+  }
+
+  function renderQuota(quota, refreshing) {
+    const root = $("quotaLive");
+    if (!root) return;
+    const btn = $("refreshQuota");
+    if (btn) btn.disabled = !!refreshing;
+    if (refreshing && !quota) {
+      root.innerHTML = `<div class="hint">${esc(tt("usage.loading"))}</div>`;
+      return;
+    }
+    if (!quota) {
+      root.innerHTML = `<div class="hint">${esc(tt("usage.empty"))}</div>`;
+      return;
+    }
+    const parts = [];
+    if (refreshing) parts.push(`<div class="hint">${esc(tt("usage.loading"))}</div>`);
+    if (quota.error) parts.push(`<div class="hint bad-text">${esc(quota.error)}</div>`);
+
+    const accounts = quota.accounts || [];
+    if (!accounts.length && !(quota.providers || []).length && !quota.error) {
+      parts.push(`<div class="hint">${esc(tt("usage.empty"))}</div>`);
+    }
+
+    accounts.forEach((acc) => {
+      const badges = [];
+      if (acc.plan) badges.push(`${tt("usage.plan")}: ${esc(acc.plan)}`);
+      if (acc.active) badges.push(tt("usage.active"));
+      if (acc.needsReauth) badges.push(tt("usage.needsReauth"));
+      const windows = (acc.windows || [])
+        .map((w) => {
+          const used = Number(w.usedPercent) || 0;
+          const left = Number(w.remainingPercent);
+          const leftSafe = Number.isFinite(left) ? left : Math.max(0, 100 - used);
+          return `<div class="quota-window">
+            <div class="quota-meta">
+              <strong>${esc(w.label)}</strong>
+              <span>${used}% ${esc(tt("usage.used"))} · ${leftSafe}% ${esc(tt("usage.remaining"))}${
+                w.resetLabel ? ` · ${esc(tt("usage.resets"))} ${esc(w.resetLabel)}` : ""
+              }</span>
+            </div>
+            <div class="quota-track"><div class="quota-fill ${toneClass(used)}" style="width:${used}%"></div></div>
+          </div>`;
+        })
+        .join("");
+      parts.push(`<div class="quota-card">
+        <div class="quota-head"><strong>${esc(acc.label || acc.id)}</strong><span class="hint">${badges.join(" · ")}</span></div>
+        ${windows || `<div class="hint">${esc(tt("usage.empty"))}</div>`}
+      </div>`);
+    });
+
+    (quota.providers || []).forEach((p) => {
+      const windows = (p.windows || [])
+        .map((w) => {
+          const used = Number(w.usedPercent) || 0;
+          const left = Number(w.remainingPercent);
+          const leftSafe = Number.isFinite(left) ? left : Math.max(0, 100 - used);
+          return `<div class="quota-window">
+            <div class="quota-meta">
+              <strong>${esc(w.label)}</strong>
+              <span>${used}% ${esc(tt("usage.used"))} · ${leftSafe}% ${esc(tt("usage.remaining"))}${
+                w.resetLabel ? ` · ${esc(tt("usage.resets"))} ${esc(w.resetLabel)}` : ""
+              }</span>
+            </div>
+            <div class="quota-track"><div class="quota-fill ${toneClass(used)}" style="width:${used}%"></div></div>
+          </div>`;
+        })
+        .join("");
+      if (!windows && !p.note) return;
+      parts.push(`<div class="quota-card">
+        <div class="quota-head"><strong>${esc(p.id)}</strong></div>
+        ${windows || `<div class="hint">${esc(p.note || "")}</div>`}
+      </div>`);
+    });
+
+    if (quota.fetchedAt) {
+      const when = new Date(quota.fetchedAt);
+      const stamp = Number.isNaN(when.getTime()) ? quota.fetchedAt : when.toLocaleString();
+      parts.push(`<div class="hint">${esc(tt("usage.updated"))}: ${esc(stamp)}</div>`);
+    }
+    root.innerHTML = parts.join("");
   }
 
   function contextFlags() {
@@ -334,16 +431,21 @@
     $("newName").value = "";
   };
   $("applyPreset").onclick = () => vscode.postMessage({ type: "preset:apply", id: els.preset.value });
+  const openGui = $("openGui");
+  if (openGui) openGui.onclick = () => vscode.postMessage({ type: "openDashboard" });
+  const refreshQuota = $("refreshQuota");
+  if (refreshQuota) refreshQuota.onclick = () => vscode.postMessage({ type: "quota:refresh" });
   if (els.locale) els.locale.onchange = () => vscode.postMessage({ type: "locale:set", locale: els.locale.value });
 
   document.querySelectorAll(".tabs button").forEach((btn) => {
     btn.onclick = () => {
       document.querySelectorAll(".tabs button").forEach((b) => b.classList.remove("active"));
       btn.classList.add("active");
-      ["agents", "providers", "sessions", "metrics", "audit"].forEach((name) => {
+      ["chat", "usage", "providers", "sessions", "more"].forEach((name) => {
         const panel = $("panel-" + name);
         if (panel) panel.classList.toggle("hidden", btn.dataset.tab !== name);
       });
+      if (btn.dataset.tab === "usage") vscode.postMessage({ type: "quota:refresh" });
     };
   });
 
@@ -399,7 +501,11 @@
       renderSessions();
       renderMetrics();
       renderAudit();
+      if (msg.quota !== undefined) renderQuota(msg.quota, msg.quotaRefreshing);
       if (msg.error) addMsg("error", msg.error);
+    }
+    if (msg.type === "quota") {
+      renderQuota(msg.quota, msg.quotaRefreshing);
     }
     if (msg.type === "context") {
       const bits = [];

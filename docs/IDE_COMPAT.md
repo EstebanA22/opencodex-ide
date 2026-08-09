@@ -38,5 +38,6 @@ No hay plugin nativo todavía. Puedes apuntar cualquier cliente OpenAI-compatibl
 
 ## Marketplace
 
-Distribución actual: [GitHub Releases](https://github.com/EstebanA22/opencodex-ide/releases).  
-Open VSX / VS Marketplace requieren cuenta de publisher; el workflow CI ya genera el artefacto VSIX.
+Publisher: `novexus` (Visual Studio Marketplace).  
+Distribución actual: [GitHub Releases](https://github.com/EstebanA22/opencodex-ide/releases) + VSIX (CI).  
+Publicación al Marketplace: `npx vsce publish` con PAT de Azure DevOps.
