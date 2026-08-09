@@ -1,0 +1,129 @@
+{
+  "name": "opencodex-ide",
+  "displayName": "OpenCodex IDE",
+  "description": "Multi-agent sidebar for the local opencodex proxy. Active-file/selection context, team orchestration, no Continue changes.",
+  "version": "0.2.0",
+  "publisher": "novexus-local",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/EstebanA22/opencodex-ide.git"
+  },
+  "bugs": {
+    "url": "https://github.com/EstebanA22/opencodex-ide/issues"
+  },
+  "homepage": "https://github.com/EstebanA22/opencodex-ide#readme",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Other"
+  ],
+  "keywords": [
+    "opencodex",
+    "codex",
+    "multi-agent",
+    "cursor",
+    "proxy"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "opencodex",
+          "title": "OpenCodex",
+          "icon": "media/opencodex.svg"
+        }
+      ]
+    },
+    "views": {
+      "opencodex": [
+        {
+          "type": "webview",
+          "id": "opencodex.chatView",
+          "name": "Multi-Agent"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "opencodex.openDashboard",
+        "title": "OpenCodex: Open Dashboard",
+        "icon": "$(globe)"
+      },
+      {
+        "command": "opencodex.refreshHealth",
+        "title": "OpenCodex: Refresh Health",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "opencodex.focusChat",
+        "title": "OpenCodex: Focus Chat"
+      },
+      {
+        "command": "opencodex.sendSelectionToAgent",
+        "title": "OpenCodex: Send Selection To Agent"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "opencodex.openDashboard",
+          "when": "view == opencodex.chatView",
+          "group": "navigation"
+        },
+        {
+          "command": "opencodex.refreshHealth",
+          "when": "view == opencodex.chatView",
+          "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "opencodex.sendSelectionToAgent",
+          "when": "editorHasSelection",
+          "group": "opencodex@1"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "OpenCodex IDE",
+      "properties": {
+        "opencodex.baseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:10100/v1",
+          "description": "OpenAI-compatible base URL for the local opencodex proxy."
+        },
+        "opencodex.apiKey": {
+          "type": "string",
+          "default": "dummy",
+          "description": "API key sent to the proxy (loopback usually accepts any value)."
+        },
+        "opencodex.defaultModel": {
+          "type": "string",
+          "default": "gpt-5.6-sol",
+          "description": "Default model id from the proxy catalog."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package --no-dependencies",
+    "test:smoke": "node ./scripts/smoke-test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.2.0",
+    "typescript": "^5.4.0"
+  }
+}
